@@ -13,12 +13,15 @@
 - `/docs/architecture_flow.md`（架构/业务流 · Mermaid）  
 - `/docs/order_state_machine.md`（订单状态机 · Mermaid）  
 - `/docs/api_contracts.md`（MCP 接口契约与示例）  
+- `/src/alpha_core/ingestion/harvester.py`（**HARVEST** 核心实现）  
+- `/src/alpha_core/signals/core_algo.py`（**CORE_ALGO** 核心实现）  
 - `/mcp/*/app.py`（各服务薄壳）  
-- `/mcp/harvest_server/app.py`（**新增：HARVEST** 薄壳）  
-- `/mcp/signal_server/app.py`（**新增：CORE_ALGO** 薄壳）  
+- `/mcp/harvest_server/app.py`（**HARVEST** 薄壳）  
+- `/mcp/signal_server/app.py`（**CORE_ALGO** 薄壳）  
 - `/orchestrator/run.py`（主控循环）  
 - `/config/defaults.yaml`（全局配置：OFI/CVD/FUSION/DIVERGENCE/STRATEGYMODE 等）  
 - `/TASK_INDEX.md` & `tasks/*.md`（任务卡）  
+- `/tools/bootstrap_github.py`（GitHub 初始化脚本）  
 
 > 说明：本仓库遵循“**可复用库在 `src/`，对外接口用 MCP 薄壳，编排放 orchestrator**”的约定。
 
@@ -31,19 +34,37 @@ repo/
 ├─ README.md
 ├─ TASK_INDEX.md
 ├─ .gitignore
+├─ .github/                                # GitHub 模板和配置
+│  ├─ ISSUE_TEMPLATE/
+│  │  ├─ epic.md
+│  │  ├─ story.md
+│  │  └─ config.yml
+│  └─ PULL_REQUEST_TEMPLATE.md
 │
 ├─ src/
 │  └─ alpha_core/                         # 核心组件包（可安装）
 │     ├─ __init__.py
 │     ├─ microstructure/                  # 微结构（成熟组件）
-│     │  ├─ ofi/real_ofi_calculator.py
-│     │  ├─ cvd/real_cvd_calculator.py
-│     │  ├─ fusion/ofi_cvd_fusion.py
-│     │  └─ divergence/ofi_cvd_divergence.py
-│     ├─ risk/strategy_mode_manager.py    # StrategyModeManager
-│     ├─ ingest/                          # ★ 新增：采集层库（HARVEST 可复用实现）
-│     │  └─ harvest.py                    # HARVEST 采集接入（ws/重连/分片/落盘契约）
+│     │  ├─ ofi/
+│     │  │  ├─ __init__.py
+│     │  │  └─ real_ofi_calculator.py
+│     │  ├─ cvd/
+│     │  │  ├─ __init__.py
+│     │  │  └─ real_cvd_calculator.py
+│     │  ├─ fusion/
+│     │  │  ├─ __init__.py
+│     │  │  └─ ofi_cvd_fusion.py
+│     │  └─ divergence/
+│     │     ├─ __init__.py
+│     │     └─ ofi_cvd_divergence.py
+│     ├─ risk/
+│     │  ├─ __init__.py
+│     │  └─ strategy_mode.py              # StrategyModeManager
+│     ├─ ingestion/                       # ★ 新增：采集层库（HARVEST 可复用实现）
+│     │  ├─ __init__.py
+│     │  └─ harvester.py                  # HARVEST 采集接入（ws/重连/分片/落盘契约）
 │     └─ signals/                         # ★ 新增：信号层库（CORE_ALGO 实现）
+│        ├─ __init__.py
 │        └─ core_algo.py                  # CORE_ALGO 信号合成（输入 z_ofi/z_cvd/fusion/div）
 │
 ├─ mcp/                                   # MCP 服务器（薄壳层）
@@ -63,11 +84,11 @@ repo/
 │  └─ overrides.d/                        # 环境覆盖
 │
 ├─ docs/
-│  ├─ architecture_flow.md
-│  ├─ order_state_machine.md
-│  └─ api_contracts.md
+│  ├─ architecture_flow.md                # 架构流程图（Mermaid）
+│  ├─ order_state_machine.md              # 订单状态机（Mermaid）
+│  └─ api_contracts.md                    # MCP 接口契约与示例
 │
-├─ tasks/
+├─ tasks/                                 # 任务卡目录（共 10 个任务）
 │  ├─ TASK-01 - 统一 Row Schema & 出站 DQ Gate（Data Contract）.md
 │  ├─ TASK-02 - Harvester WS Adapter（Binance Futures）.md
 │  ├─ TASK-03 - Harvest MCP 薄壳与本地运行脚本.md
@@ -79,9 +100,19 @@ repo/
 │  ├─ TASK-09 - 复盘报表（时段胜率、盈亏比、滑点、费用）.md
 │  └─ TASK-10 - 文档与契约同步（／docs 与 README 链接校验）.md
 │
-└─ scripts/
-   ├─ dev_run.sh
-   └─ harvest_local.sh                    # ★ 新增：单机Harvester启动脚本（可选）
+├─ scripts/
+│  ├─ dev_run.sh                          # 开发环境启动脚本
+│  ├─ harvest_local.sh                    # ★ 新增：单机Harvester启动脚本
+│  └─ run_success_harvest.py              # HARVEST 运行脚本（历史）
+│
+├─ tools/                                 # 工具脚本
+│  ├─ bootstrap_github.py                 # GitHub 初始化脚本（创建标签/里程碑/Epic）
+│  └─ github_seed/
+│     ├─ labels.json                      # GitHub 标签定义
+│     ├─ milestones.json                  # GitHub 里程碑定义
+│     └─ epics.json                       # GitHub Epic 定义（V4.1 10个Epic）
+│
+└─ logs/                                  # 日志目录（运行时生成）
 ```
 
 ---
