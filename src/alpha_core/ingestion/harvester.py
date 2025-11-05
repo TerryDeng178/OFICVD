@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections import deque, OrderedDict
 from typing import Dict, List, Any, Optional
@@ -400,6 +400,9 @@ class SuccessOFICVDHarvester:
         # Features去重游标（防止同一秒重复入表）
         self.last_feature_second = {symbol: 0 for symbol in self.symbols}
         
+        # P0-2: OFI 去重栅栏 - 记录每个 symbol 最后一次产出的 OFI 的 last_id
+        self._last_ofi_last_id = {symbol: None for symbol in self.symbols}
+        
         for symbol in self.symbols:
             self.scene_coverage_stats[symbol] = {
                 'A_H': 0, 'A_L': 0, 'Q_H': 0, 'Q_L': 0
@@ -516,6 +519,20 @@ class SuccessOFICVDHarvester:
             self.w_ofi = float(_env('W_OFI', '0.6'))
             self.w_cvd = float(_env('W_CVD', '0.4'))
             self.fusion_cal_k = float(_env('FUSION_CAL_K', '1.0'))
+            
+            # 初始化 PathBuilder（统一路径构造器）
+            from alpha_core.ingestion.path_utils import PathBuilder
+            self.path_builder = PathBuilder(
+                data_root=str(self.deploy_root / "data" / "ofi_cvd"),
+                artifacts_root=str(self.deploy_root / "artifacts" / "ofi_cvd"),
+                tzname="UTC"
+            )
+            # 使用已有的 writerid（如果已生成）或使用 PathBuilder 的 writerid
+            if not hasattr(self, 'writerid'):
+                self.writerid = self.path_builder.writerid
+            else:
+                # 确保 PathBuilder 使用相同的 writerid
+                self.path_builder.writerid = self.writerid
         else:
             # 新格式：从配置字典读取（严格运行时模式）
             # 1) 符号与路径
@@ -561,6 +578,20 @@ class SuccessOFICVDHarvester:
             logger.info(f"paths resolved → deploy_root={self.deploy_root}, "
                         f"output_dir={self.output_dir}, preview_dir={self.preview_dir}, "
                         f"artifacts_dir={self.artifacts_dir}")
+            
+            # 初始化 PathBuilder（统一路径构造器）
+            from alpha_core.ingestion.path_utils import PathBuilder
+            self.path_builder = PathBuilder(
+                data_root=str(self.deploy_root / "data" / "ofi_cvd"),
+                artifacts_root=str(self.deploy_root / "artifacts" / "ofi_cvd"),
+                tzname="UTC"
+            )
+            # 使用已有的 writerid（如果已生成）或使用 PathBuilder 的 writerid
+            if not hasattr(self, 'writerid'):
+                self.writerid = self.path_builder.writerid
+            else:
+                # 确保 PathBuilder 使用相同的 writerid
+                self.path_builder.writerid = self.writerid
             
             # 2) 缓存/并发/文件旋转
             bufs = c.get("buffers", {})
@@ -958,22 +989,28 @@ class SuccessOFICVDHarvester:
         (self.artifacts_dir / "deadletter").mkdir(parents=True, exist_ok=True)
         logger.debug(f"创建 artifacts 子目录: {self.artifacts_dir}")
         
+        # 创建统一目录结构：{data_root}/{layer}（raw/preview）
+        if hasattr(self, 'path_builder'):
+            for layer in ("raw", "preview"):
+                (self.path_builder.data_root / layer).mkdir(parents=True, exist_ok=True)
+            logger.debug(f"创建统一目录结构: {self.path_builder.data_root}/raw 和 /preview")
+        
         # 再创建日期分区（使用UTC时间确保与数据分区一致）
         today_utc = datetime.utcnow().strftime("%Y-%m-%d")
         current_hour = datetime.utcnow().strftime("%H")
         
+        # 统一使用 PathBuilder 的层级根，避免与写盘层级不一致
+        raw_base = (self.path_builder.data_root / "raw") if hasattr(self, "path_builder") else self.output_dir
+        preview_base = (self.path_builder.data_root / "preview") if hasattr(self, "path_builder") else self.preview_dir
+        
         for symbol in self.symbols:
             sym = self._norm_symbol(symbol)
-            # 权威库：只保留 raw（prices/orderbook）
-            for kind in ['prices', 'orderbook']:
-                # 创建日期+小时分区目录
-                dir_path = self.output_dir / f"date={today_utc}" / f"hour={current_hour}" / f"symbol={sym}" / f"kind={kind}"
-                dir_path.mkdir(parents=True, exist_ok=True)
-            # 预览库
+            # 权威库（raw）：prices & orderbook
+            for kind in ('prices', 'orderbook'):
+                (raw_base / f"date={today_utc}" / f"hour={current_hour}" / f"symbol={sym}" / f"kind={kind}").mkdir(parents=True, exist_ok=True)
+            # 预览库（preview）：ofi/cvd/fusion/events/features
             for kind in self.preview_kinds:
-                # 创建日期+小时分区目录
-                dir_path = self.preview_dir / f"date={today_utc}" / f"hour={current_hour}" / f"symbol={sym}" / f"kind={kind}"
-                dir_path.mkdir(parents=True, exist_ok=True)
+                (preview_base / f"date={today_utc}" / f"hour={current_hour}" / f"symbol={sym}" / f"kind={kind}").mkdir(parents=True, exist_ok=True)
         
         logger.info(f"目录结构已创建: deploy_root={self.deploy_root}")
         logger.info(f"  - data: {self.output_dir}")
@@ -1620,12 +1657,24 @@ class SuccessOFICVDHarvester:
             elif ob_snapshot:
                 alignment_source = 'strict'
             
+            # P0-3: OFI 去重栅栏 - 同一 last_id 不重复产出
             if ob_snapshot:
-                ofi_result = self._calculate_ofi(symbol, {
-                    'bids': ob_snapshot['bids'],
-                    'asks': ob_snapshot['asks'],
-                    'event_ts_ms': ob_snapshot['ts_ms']
-                })
+                snapshot_last_id = ob_snapshot.get('last_id')
+                ofi_result = None
+                
+                # 只有在严格对齐（strict）并且 last_id 发生变化时才产 OFI
+                if alignment_source == 'strict':
+                    if self._last_ofi_last_id[symbol] != snapshot_last_id:
+                        self._last_ofi_last_id[symbol] = snapshot_last_id
+                        # 计算 OFI
+                        ofi_result = self._calculate_ofi(symbol, {
+                            'bids': ob_snapshot['bids'],
+                            'asks': ob_snapshot['asks'],
+                            'event_ts_ms': ob_snapshot['ts_ms']
+                        })
+                    # else: 跳过生成，避免重复（同一 last_id 已产出过）
+                # else: fallback 对齐（没有合格快照）下，默认不产 OFI，等下次有新快照
+                
                 if ofi_result:
                     ofi_ts_ms = ob_snapshot['ts_ms']  # 使用订单簿时间
                     lag_ms_to_trade = max(0, event_ts_ms - ob_snapshot['ts_ms'])
@@ -1913,6 +1962,14 @@ class SuccessOFICVDHarvester:
             # 创建DataFrame
             df = pd.DataFrame(buf)
             
+            # P0-1: 写盘前去重 - 按 row_id 保留最后一条（在 DQ Gate 之前）
+            if 'row_id' in df.columns:
+                pre = len(df)
+                df = df.drop_duplicates(subset=['row_id'], keep='last')
+                deduped = pre - len(df)
+                if deduped > 0:
+                    logger.warning(f"[DEDUP] {symbol}-{kind} dropped {deduped} duplicate row_id before DQ")
+            
             # 数据清洗：统一NaN/inf处理
             df = df.replace([np.inf, -np.inf], np.nan)
             
@@ -1928,36 +1985,50 @@ class SuccessOFICVDHarvester:
                     ts_ms = int(df['ts_ms'].min()) if 'ts_ms' in df.columns and not df.empty else int(time.time() * 1000)
                     sym = self._norm_symbol(symbol)
                     
-                    # 生成日期+小时分区
-                    dt = datetime.fromtimestamp(ts_ms / 1000, tz=datetime.timezone.utc)
-                    date_str = dt.strftime('%Y-%m-%d')
-                    hour_str = dt.strftime('%H')
-                    
-                    # 保存 DQ 报告
-                    dq_reports_dir = self.artifacts_dir / "dq_reports" / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}"
-                    dq_reports_dir.mkdir(parents=True, exist_ok=True)
-                    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')
-                    writerid = getattr(self, 'writerid', uuid.uuid4().hex[:8])
-                    dq_report_file = dq_reports_dir / f"dq-{ts_ms}-{writerid}.json"
-                    
-                    with open(dq_report_file, 'w', encoding='utf-8') as f:
-                        json.dump(dq_report, f, indent=2, ensure_ascii=False)
+                    # 使用 PathBuilder 生成 DQ 报告路径
+                    if hasattr(self, 'path_builder'):
+                        dq_report_file = self.path_builder.dq_report_path(ts_ms, sym, kind, writerid=self.writerid)
+                        dq_report_file.parent.mkdir(parents=True, exist_ok=True)
+                        
+                        with open(dq_report_file, 'w', encoding='utf-8') as f:
+                            json.dump(dq_report, f, indent=2, ensure_ascii=False)
+                    else:
+                        # 降级：使用旧路径逻辑
+                        dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                        date_str = dt.strftime('%Y-%m-%d')
+                        hour_str = dt.strftime('%H')
+                        dq_reports_dir = self.artifacts_dir / "dq_reports" / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}"
+                        dq_reports_dir.mkdir(parents=True, exist_ok=True)
+                        writerid = getattr(self, 'writerid', uuid.uuid4().hex[:8])
+                        dq_report_file = dq_reports_dir / f"dq-{ts_ms}-{writerid}.json"
+                        with open(dq_report_file, 'w', encoding='utf-8') as f:
+                            json.dump(dq_report, f, indent=2, ensure_ascii=False)
                     
                     # 保存坏数据到 deadletter
                     if not bad_df.empty:
-                        deadletter_dir = self.artifacts_dir / "deadletter" / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}"
-                        deadletter_dir.mkdir(parents=True, exist_ok=True)
-                        deadletter_file = deadletter_dir / f"bad-{ts_ms}-{writerid}.ndjson"
-                        
-                        with open(deadletter_file, 'w', encoding='utf-8') as f:
-                            for _, row in bad_df.iterrows():
-                                record = row.to_dict()
-                                # 处理NaN值
-                                for k, v in record.items():
-                                    if pd.isna(v):
-                                        record[k] = None
-                                json.dump(record, f, ensure_ascii=False)
-                                f.write('\n')
+                        if hasattr(self, 'path_builder'):
+                            deadletter_file = self.path_builder.deadletter_path(ts_ms, sym, kind, writerid=self.writerid)
+                            deadletter_file.parent.mkdir(parents=True, exist_ok=True)
+                            
+                            with open(deadletter_file, 'w', encoding='utf-8') as f:
+                                for _, row in bad_df.iterrows():
+                                    rec = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
+                                    json.dump(rec, f, ensure_ascii=False)
+                                    f.write('\n')
+                        else:
+                            # 降级：使用旧路径逻辑
+                            dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                            date_str = dt.strftime('%Y-%m-%d')
+                            hour_str = dt.strftime('%H')
+                            deadletter_dir = self.artifacts_dir / "deadletter" / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}"
+                            deadletter_dir.mkdir(parents=True, exist_ok=True)
+                            writerid = getattr(self, 'writerid', uuid.uuid4().hex[:8])
+                            deadletter_file = deadletter_dir / f"bad-{ts_ms}-{writerid}.ndjson"
+                            with open(deadletter_file, 'w', encoding='utf-8') as f:
+                                for _, row in bad_df.iterrows():
+                                    rec = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
+                                    json.dump(rec, f, ensure_ascii=False)
+                                    f.write('\n')
                         
                         logger.warning(f"[DQ_GATE] {symbol}-{kind}: {dq_report['bad_rows']}坏数据已分流到deadletter, "
                                      f"合格数据: {dq_report['ok_rows']}, 报告: {dq_report_file.name}")
@@ -2012,7 +2083,7 @@ class SuccessOFICVDHarvester:
             
             # 路由输出路径，并打上 source_tier
             df['source_tier'] = 'preview' if kind in self.preview_kinds else 'raw'
-            base_dir = self.preview_dir if kind in self.preview_kinds else self.output_dir
+            layer = "preview" if kind in self.preview_kinds else "raw"
             
             # 归一化 symbol 为小写（用于目录命名）
             sym = self._norm_symbol(symbol)
@@ -2050,24 +2121,90 @@ class SuccessOFICVDHarvester:
                     # 分批保存
                     for i in range(0, len(time_group), self.max_rows_per_file):
                         batch = time_group.iloc[i:i+self.max_rows_per_file]
-                        filename = f"part-{time.time_ns()}-{uuid.uuid4().hex[:6]}-batch{i//self.max_rows_per_file}.parquet"
-                        filepath = base_dir / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}" / filename
-                        filepath.parent.mkdir(parents=True, exist_ok=True)
-                        batch.to_parquet(filepath, compression='snappy', index=False)
-                        logger.info(f"保存数据: {symbol}-{kind} date={date_str} hour={hour_str} rows={len(batch)} → {filepath}")
+                        start_ms = int(batch["ts_ms"].min())
+                        end_ms = int(batch["ts_ms"].max())
+                        rows = int(len(batch))
+                        
+                        # 使用 PathBuilder 生成路径（统一命名 + 原子写 + sidecar）
+                        if hasattr(self, 'path_builder'):
+                            pq_path, sidecar_path, tmp_path = self.path_builder.part_paths(
+                                layer=layer, start_ms=start_ms, end_ms=end_ms,
+                                symbol=sym, kind=kind, rows=rows, writerid=self.writerid
+                            )
+                            
+                            # 原子写：先写 .tmp，再 rename
+                            tmp_path.parent.mkdir(parents=True, exist_ok=True)
+                            batch.to_parquet(tmp_path, compression='snappy', index=False)
+                            
+                            # 计算 sha1 并写 sidecar
+                            from alpha_core.ingestion.path_utils import PathBuilder as _PB
+                            file_sha1 = _PB.sha1(tmp_path)
+                            sidecar = {
+                                "schema_version": "preagg_meta/v1",
+                                "layer": layer, "kind": kind, "symbol": sym,
+                                "date": date_str, "hour": hour_str,
+                                "start_ms": start_ms, "end_ms": end_ms, "rows": rows,
+                                "file_sha1": file_sha1, "writerid": self.writerid,
+                            }
+                            with open(sidecar_path, 'w', encoding='utf-8') as f:
+                                json.dump(sidecar, f, indent=2, ensure_ascii=False)
+                            
+                            os.replace(tmp_path, pq_path)  # 原子替换
+                            logger.info(f"保存数据: {symbol}-{kind} rows={rows} → {pq_path.name}")
+                        else:
+                            # 降级：使用旧路径逻辑
+                            base_dir = self.preview_dir if kind in self.preview_kinds else self.output_dir
+                            filename = f"part-{time.time_ns()}-{uuid.uuid4().hex[:6]}-batch{i//self.max_rows_per_file}.parquet"
+                            filepath = base_dir / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}" / filename
+                            filepath.parent.mkdir(parents=True, exist_ok=True)
+                            batch.to_parquet(filepath, compression='snappy', index=False)
+                            logger.info(f"保存数据: {symbol}-{kind} date={date_str} hour={hour_str} rows={rows} → {filepath}")
                         
                         # 更新每小时写盘行数统计
-                        self.hourly_write_counts[kind] += len(batch)
+                        self.hourly_write_counts[kind] += rows
                 else:
                     # 单文件保存
-                    filename = f"part-{time.time_ns()}-{uuid.uuid4().hex[:6]}.parquet"
-                    filepath = base_dir / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}" / filename
-                    filepath.parent.mkdir(parents=True, exist_ok=True)
-                    time_group.to_parquet(filepath, compression='snappy', index=False)
-                    logger.info(f"保存数据: {symbol}-{kind} date={date_str} hour={hour_str} rows={len(time_group)} → {filepath}")
+                    start_ms = int(time_group["ts_ms"].min())
+                    end_ms = int(time_group["ts_ms"].max())
+                    rows = int(len(time_group))
+                    
+                    # 使用 PathBuilder 生成路径（统一命名 + 原子写 + sidecar）
+                    if hasattr(self, 'path_builder'):
+                        pq_path, sidecar_path, tmp_path = self.path_builder.part_paths(
+                            layer=layer, start_ms=start_ms, end_ms=end_ms,
+                            symbol=sym, kind=kind, rows=rows, writerid=self.writerid
+                        )
+                        
+                        # 原子写：先写 .tmp，再 rename
+                        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+                        time_group.to_parquet(tmp_path, compression='snappy', index=False)
+                        
+                        # 计算 sha1 并写 sidecar
+                        from alpha_core.ingestion.path_utils import PathBuilder as _PB
+                        file_sha1 = _PB.sha1(tmp_path)
+                        sidecar = {
+                            "schema_version": "preagg_meta/v1",
+                            "layer": layer, "kind": kind, "symbol": sym,
+                            "date": date_str, "hour": hour_str,
+                            "start_ms": start_ms, "end_ms": end_ms, "rows": rows,
+                            "file_sha1": file_sha1, "writerid": self.writerid,
+                        }
+                        with open(sidecar_path, 'w', encoding='utf-8') as f:
+                            json.dump(sidecar, f, indent=2, ensure_ascii=False)
+                        
+                        os.replace(tmp_path, pq_path)  # 原子替换
+                        logger.info(f"保存数据: {symbol}-{kind} rows={rows} → {pq_path.name}")
+                    else:
+                        # 降级：使用旧路径逻辑
+                        base_dir = self.preview_dir if kind in self.preview_kinds else self.output_dir
+                        filename = f"part-{time.time_ns()}-{uuid.uuid4().hex[:6]}.parquet"
+                        filepath = base_dir / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}" / filename
+                        filepath.parent.mkdir(parents=True, exist_ok=True)
+                        time_group.to_parquet(filepath, compression='snappy', index=False)
+                        logger.info(f"保存数据: {symbol}-{kind} date={date_str} hour={hour_str} rows={rows} → {filepath}")
                     
                     # 更新每小时写盘行数统计
-                    self.hourly_write_counts[kind] += len(time_group)
+                    self.hourly_write_counts[kind] += rows
             
         except Exception as e:
             logger.error(f"保存数据错误 {symbol}-{kind}: {e.__class__.__name__}: {e}")
