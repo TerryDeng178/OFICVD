@@ -8,6 +8,15 @@ paths:
   timezone: "UTC"    # 分区的基准时区（强烈建议 UTC）
   layer: "raw"       # harvester 默认只写 raw；preview 由派生/接线任务产出
 
+# 交易对配置（6个主要交易对）
+symbols:
+  - "BTCUSDT"
+  - "ETHUSDT"
+  - "BNBUSDT"
+  - "SOLUSDT"
+  - "XRPUSDT"
+  - "DOGEUSDT"
+
 harvest:
   rotate:
     max_rows: 500000

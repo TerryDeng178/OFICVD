@@ -263,13 +263,29 @@ risk:
 pip install -e .
 
 # 2) 启动 HARVEST（本地）
+# Linux/macOS:
 bash scripts/harvest_local.sh
-# 或
+
+# Windows PowerShell:
+.\scripts\harvest_local.ps1
+
+# 或手动命令（Linux/macOS）:
 python -m mcp.harvest_server.app \
   --config ./config/defaults.yaml \
-  --output ./data \
+  --output ./deploy/data/ofi_cvd \
   --format parquet \
   --rotate.max_rows 200000 --rotate.max_sec 60
+
+# Windows PowerShell (单行):
+python -m mcp.harvest_server.app --config ./config/defaults.yaml --output ./deploy/data/ofi_cvd --format parquet --rotate.max_rows 200000 --rotate.max_sec 60
+
+# Windows PowerShell (使用反引号续行):
+python -m mcp.harvest_server.app `
+  --config ./config/defaults.yaml `
+  --output ./deploy/data/ofi_cvd `
+  --format parquet `
+  --rotate.max_rows 200000 `
+  --rotate.max_sec 60
 ```
 
 **M2 · 启动 CORE_ALGO（信号层）**
@@ -328,8 +344,53 @@ python -m orchestrator.run \
 ---
 
 ## 8) 常见问题（FAQ）
+
+### PyYAML 未安装
+如果未安装 PyYAML，采集器会使用空配置并继续运行（会使用默认的 6 个交易对）。建议安装 PyYAML 以获得完整的配置支持：
+
+```bash
+pip install pyyaml
+```
+
+或者安装所有依赖：
+
+```bash
+pip install -e .
+```
+
+### 配置文件路径问题
+如果遇到配置文件加载错误，请确保：
+- 配置文件路径正确（默认：`./config/defaults.yaml`）
+- 使用 `--config` 参数指定正确的配置文件路径
+- 配置文件格式为有效的 YAML
+
+### 输出目录路径问题
+如果输出目录路径不正确（例如出现 `deploy/deploy/...`），请确保：
+- 使用相对路径时，不要包含 `./deploy/` 前缀（薄壳会自动处理）
+- 例如：使用 `--output ./deploy/data/ofi_cvd` 会被转换为 `data/ofi_cvd`
+- 或者直接使用绝对路径
+
+### Windows PowerShell 执行策略
+如果 PowerShell 脚本无法执行，可能需要调整执行策略：
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+或者直接使用 Python 命令：
+
+```powershell
+python -m mcp.harvest_server.app --config ./config/defaults.yaml
+```
+
+### 端口或网络连接问题
+- 确保能够访问 Binance Futures WebSocket API
+- 检查防火墙设置
+- 如果在中国大陆，可能需要使用代理
+
+### 其他常见问题
 - **深夜无量导致 OFI/CVD 异常？**：开启 `risk.gates.require_activity`，低活跃时仅观测不下单。  
-- **K 线整点更新的滞后干扰？**：信号层以“逐笔/订单簿微结构”为主，避免依赖整点 K。  
+- **K 线整点更新的滞后干扰？**：信号层以"逐笔/订单簿微结构"为主，避免依赖整点 K。  
 - **跨平台路径不一致？**：统一使用规范化路径与稳定 JSON dump（详见修复记录）。  
 
 ---

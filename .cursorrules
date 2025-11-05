@@ -1,0 +1,60 @@
+# Cursor Rules for OFI+CVD Trading System
+
+## 操作系统环境
+- **开发环境**: Windows (PowerShell)
+- **所有命令和脚本**: 默认使用 Windows/PowerShell 格式
+
+## Windows 命令格式规则
+
+### 1. 命令行续行符
+- **PowerShell**: 使用反引号 `` ` `` 作为续行符（不是反斜杠 `\`）
+- **示例**:
+  ```powershell
+  python -m mcp.harvest_server.app `
+    --config ./config/defaults.yaml `
+    --output ./deploy/data/ofi_cvd `
+    --format parquet
+  ```
+
+### 2. 脚本文件
+- **PowerShell 脚本**: 使用 `.ps1` 扩展名
+- **Bash 脚本**: 如果提供，应同时提供 PowerShell 版本
+- **脚本路径**: 使用 `.\scripts\script_name.ps1` 格式
+
+### 3. 路径格式
+- **路径分隔符**: 使用反斜杠 `\` 或正斜杠 `/`（PowerShell 都支持）
+- **相对路径**: 使用 `./` 或 `.\` 前缀
+- **绝对路径**: 使用 Windows 格式，如 `F:\OFICVD\...`
+
+### 4. 文件权限
+- **Windows**: 不需要 `chmod` 命令（只在 Linux/macOS 需要）
+- **PowerShell 脚本执行**: 如果遇到执行策略限制，使用 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+
+### 5. 环境变量
+- **PowerShell**: 使用 `$env:VARIABLE_NAME` 格式
+- **设置环境变量**: `$env:VARIABLE_NAME = "value"`
+- **示例**:
+  ```powershell
+  $env:OUTPUT_DIR = "./deploy/data/ofi_cvd"
+  python -m mcp.harvest_server.app
+  ```
+
+### 6. 命令示例优先级
+在文档、README、任务卡中：
+1. **优先展示**: Windows PowerShell 命令
+2. **可选项**: Linux/macOS Bash 命令（作为注释或备选）
+
+### 7. 创建新脚本时
+- **必须**: 创建 PowerShell 版本（`.ps1`）
+- **可选**: 同时提供 Bash 版本（`.sh`）作为跨平台支持
+
+## 代码风格
+- Python 代码遵循 PEP 8
+- 使用 UTF-8 编码
+- 行长度限制：120 字符
+
+## 文档规范
+- 所有命令示例默认使用 Windows PowerShell 格式
+- 如果提供 Linux/macOS 示例，应明确标注
+- 路径示例使用 Windows 格式
+

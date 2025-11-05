@@ -1,5 +1,5 @@
-# TASK-02 · Harvester WS Adapter（Binance Futures）
-> 里程碑：M1 | 更新：2025-11-05 (Asia/Tokyo)
+# ✅ TASK-02 · Harvester WS Adapter（Binance Futures）
+> 里程碑：M1 | 状态：已完成 | 更新：2025-11-05 (Asia/Tokyo)
 
 ## 背景
 基于 TASK-01 的 Schema 与 DQ，接入 Binance Futures WS（`aggTrade` / `bookTicker` / `depth@100ms`）。
@@ -26,4 +26,19 @@
 - [x] 数据可被特征层读取（已实现 Parquet 格式，支持特征层读取）；  
 - [x] 健康日志包含关键指标（已实现健康检查循环和统计信息输出）。
 
-**状态：已完成（核心逻辑已从 `run_success_harvest.py` 迁移至 `src/alpha_core/ingestion/harvester.py`，包含完整的 WebSocket 连接、重连、数据处理、OFI/CVD/Fusion 计算、分片轮转等功能）**
+## 完成状态
+
+**✅ 已完成**
+
+核心逻辑已从 `run_success_harvest.py` 迁移至 `src/alpha_core/ingestion/harvester.py`，包含：
+
+- ✅ 完整的 WebSocket 连接与重连机制
+- ✅ 统一事件到 Row 的映射（`_process_trade_data`、`_process_orderbook_data`）
+- ✅ 数据质量检查（DQ Gate 集成）
+- ✅ OFI/CVD/Fusion/Divergence 计算
+- ✅ 分片轮转（行数/秒数）
+- ✅ 统计健康度（重连次数、吞吐、丢包）
+- ✅ 7x24 小时连续运行支持，带自愈重连
+- ✅ Parquet 格式输出，支持特征层读取
+
+**完成日期**: 2025-11-05

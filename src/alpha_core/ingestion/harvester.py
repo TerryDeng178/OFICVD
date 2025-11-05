@@ -218,7 +218,11 @@ class SuccessOFICVDHarvester:
         self.orderbooks = {symbol: {} for symbol in self.symbols}
         
         # 订单簿快照队列（用于时间对齐）
-        # orderbook_buf_len已在_apply_cfg中设置
+        # orderbook_buf_len已在_apply_cfg中设置，但需要先初始化默认值
+        if not hasattr(self, 'orderbook_buf_len'):
+            self.orderbook_buf_len = 1024  # 临时默认值，_apply_cfg 会覆盖
+        if not hasattr(self, 'features_lookback_secs'):
+            self.features_lookback_secs = 60  # 临时默认值，_apply_cfg 会覆盖
         self.orderbook_buf = {symbol: deque(maxlen=self.orderbook_buf_len) for symbol in self.symbols}
         
         # 2×2场景标签计算缓存
@@ -648,6 +652,11 @@ class SuccessOFICVDHarvester:
             self.w_ofi = float(_env('W_OFI', '0.6'))
             self.w_cvd = float(_env('W_CVD', '0.4'))
             self.fusion_cal_k = float(_env('FUSION_CAL_K', '1.0'))
+            
+            # 运行期工况常量（严格配置模式下也需要设置默认值）
+            runtime = c.get("runtime", {})
+            self.orderbook_buf_len = int(runtime.get("orderbook_buf_len", 1024))
+            self.features_lookback_secs = int(runtime.get("features_lookback_secs", 60))
     
     def _check_health(self):
         """健康检查：监控数据流和连接状态（补丁B：分流监控 + 子流超时检测）"""
