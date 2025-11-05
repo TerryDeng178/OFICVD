@@ -3,7 +3,26 @@
 Ingestion - 数据采集层模块
 """
 
-from .harvester import Harvester
+from .harvester import SuccessOFICVDHarvester, stable_row_id, _env, ALLOWED_ENV
 
-__all__ = ['Harvester']
+__all__ = ['SuccessOFICVDHarvester', 'Harvester', 'stable_row_id', '_env', 'ALLOWED_ENV', 'run_ws_harvest']
+
+# 别名兼容
+Harvester = SuccessOFICVDHarvester
+
+# 便捷入口函数
+async def run_ws_harvest(config: dict = None, **kwargs):
+    """
+    运行 WebSocket 采集器（便捷入口）
+    
+    Args:
+        config: 配置字典（来自运行时包）
+        **kwargs: 向后兼容参数（symbols, run_hours, output_dir等）
+    
+    Returns:
+        Harvester 实例
+    """
+    harvester = SuccessOFICVDHarvester(cfg=config, **kwargs)
+    await harvester.run()
+    return harvester
 

@@ -60,9 +60,9 @@ repo/
 │     ├─ risk/
 │     │  ├─ __init__.py
 │     │  └─ strategy_mode.py              # StrategyModeManager
-│     ├─ ingestion/                       # ★ 新增：采集层库（HARVEST 可复用实现）
+│     ├─ ingestion/                       # ★ 采集层库（HARVEST 成熟实现）
 │     │  ├─ __init__.py
-│     │  └─ harvester.py                  # HARVEST 采集接入（ws/重连/分片/落盘契约）
+│     │  └─ harvester.py                  # HARVEST 采集接入（已实现：WS/重连/分片/落盘/DQ/OFI/CVD/Fusion）
 │     └─ signals/                         # ★ 新增：信号层库（CORE_ALGO 实现）
 │        ├─ __init__.py
 │        └─ core_algo.py                  # CORE_ALGO 信号合成（输入 z_ofi/z_cvd/fusion/div）
@@ -103,7 +103,7 @@ repo/
 ├─ scripts/
 │  ├─ dev_run.sh                          # 开发环境启动脚本
 │  ├─ harvest_local.sh                    # ★ 新增：单机Harvester启动脚本
-│  └─ run_success_harvest.py              # HARVEST 运行脚本（历史）
+│  └─ run_success_harvest.py              # HARVEST 运行脚本（历史，核心逻辑已迁移至 harvester.py）
 │
 ├─ tools/                                 # 工具脚本
 │  ├─ bootstrap_github.py                 # GitHub 初始化脚本（创建标签/里程碑/Epic）
