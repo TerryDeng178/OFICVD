@@ -41,10 +41,10 @@ repo/
 │     │  ├─ fusion/ofi_cvd_fusion.py
 │     │  └─ divergence/ofi_cvd_divergence.py
 │     ├─ risk/strategy_mode_manager.py    # StrategyModeManager
-│     ├─ ingestion/                       # ★ 新增：采集层库（HARVEST 可复用实现）
-│     │  └─ harvester.py                  # WS接入→统一Row→分片→DQ
+│     ├─ ingest/                          # ★ 新增：采集层库（HARVEST 可复用实现）
+│     │  └─ harvest.py                    # HARVEST 采集接入（ws/重连/分片/落盘契约）
 │     └─ signals/                         # ★ 新增：信号层库（CORE_ALGO 实现）
-│        └─ core_algo.py                  # 统一信号API，Sink: JSONL/SQLite
+│        └─ core_algo.py                  # CORE_ALGO 信号合成（输入 z_ofi/z_cvd/fusion/div）
 │
 ├─ mcp/                                   # MCP 服务器（薄壳层）
 │  ├─ data_feed_server/app.py             # 复用 ingestion.harvester
@@ -243,7 +243,10 @@ python -m mcp.harvest_server.app \
 
 **M2 · 启动 CORE_ALGO（信号层）**
 ```bash
-# JSONL Sink（默认）
+# 信号服务：直接运行 core_algo 模块
+python -m alpha_core.signals.core_algo --input data/*.parquet --out out/signals.jsonl
+
+# 或通过 MCP 服务（JSONL Sink）
 V13_SINK=jsonl V13_OUTPUT_DIR=./runtime \
 python -m mcp.signal_server.app --config ./config/defaults.yaml
 
