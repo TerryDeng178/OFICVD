@@ -1,0 +1,38 @@
+# -*- coding: utf-8 -*-
+# OFI+CVD 交易系统 - 默认配置文件
+# 
+# 组件参数对齐：OFI/CVD/FUSION/DIVERGENCE/STRATEGYMODE
+
+# TODO: 添加完整的默认配置
+# - OFI 配置
+# - CVD 配置
+# - FUSION 配置
+# - DIVERGENCE 配置
+# - STRATEGYMODE 配置
+
+system:
+  version: "v4.0.0"
+  environment: "development"
+  timezone: "Asia/Tokyo"
+
+components:
+  ofi:
+    # TODO: 添加 OFI 配置参数
+    pass
+  
+  cvd:
+    # TODO: 添加 CVD 配置参数
+    pass
+  
+  fusion:
+    # TODO: 添加 FUSION 配置参数
+    pass
+  
+  divergence:
+    # TODO: 添加 DIVERGENCE 配置参数
+    pass
+  
+  strategy:
+    # TODO: 添加 STRATEGYMODE 配置参数
+    pass
+
