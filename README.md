@@ -68,12 +68,16 @@ repo/
 │  └─ api_contracts.md
 │
 ├─ tasks/
-│  ├─ TASK-01 - Data MCP：统一 Row Schema + 出站 DQ Gate（V4）.md
-│  ├─ TASK-02 - Data MCP：接入真实 WS／Harvester（实时）.md
-│  ├─ TASK-03 - Harvest：WS→统一Row→DQ→落地（jsonl/parquet）.md
-│  ├─ TASK-04 - Signal：CORE_ALGO 服务化（Sink: jsonl/sqlite）.md
-│  ├─ TASK-05 - Docs：补齐 HARVEST/CORE_ALGO 契约示例.md
-│  └─ TASK-06 - Orchestrator：编排与烟囱测试（M1→M3）.md
+│  ├─ TASK-01 - 统一 Row Schema & 出站 DQ Gate（Data Contract）.md
+│  ├─ TASK-02 - Harvester WS Adapter（Binance Futures）.md
+│  ├─ TASK-03 - Harvest MCP 薄壳与本地运行脚本.md
+│  ├─ TASK-04 - 特征计算接线（OFI＋CVD＋FUSION＋DIVERGENCE）.md
+│  ├─ TASK-05 - CORE_ALGO 信号服务（Sink－JSONL 或 SQLite）.md
+│  ├─ TASK-06 - StrategyMode ＆ 风控护栏（spread／lag／activity 等）.md
+│  ├─ TASK-07 - Orchestrator 编排与端到端冒烟.md
+│  ├─ TASK-08 - 回放＋回测 Harness（JSONL 或 Parquet → 信号 → PnL）.md
+│  ├─ TASK-09 - 复盘报表（时段胜率、盈亏比、滑点、费用）.md
+│  └─ TASK-10 - 文档与契约同步（／docs 与 README 链接校验）.md
 │
 └─ scripts/
    ├─ dev_run.sh
@@ -258,10 +262,26 @@ python -m orchestrator.run \
 ---
 
 ## 6) 任务卡（与 `TASK_INDEX.md` 对齐）
-- `TASK-03 - Harvest：WS 采集 → 统一 Row Schema → 出站 DQ Gate（落地 jsonl/parquet）`
-- `TASK-04 - Signal：CORE_ALGO 服务化（Sink: jsonl/sqlite + 健康度指标）`
-- `TASK-05 - Docs：/docs/api_contracts.md 扩充 HARVEST/CORE_ALGO 契约 & 样例`
-- `TASK-06 - Orchestrator：编排与烟囱测试（M1→M3）`
+
+### 任务列表（共 10 个任务）
+
+**M1 · 数据打通**：
+- **TASK-01** - 统一 Row Schema & 出站 DQ Gate（Data Contract）
+- **TASK-02** - Harvester WS Adapter（Binance Futures）
+- **TASK-03** - Harvest MCP 薄壳与本地运行脚本
+- **TASK-04** - 特征计算接线（OFI＋CVD＋FUSION＋DIVERGENCE）
+
+**M2 · 信号与风控**：
+- **TASK-05** - CORE_ALGO 信号服务（Sink: JSONL/SQLite）
+- **TASK-06** - StrategyMode & 风控护栏（spread/lag/activity 等）
+- **TASK-07** - Orchestrator 编排与端到端冒烟
+
+**M3 · 编排、回测与复盘**：
+- **TASK-08** - 回放/回测 Harness（JSONL/Parquet → 信号 → PnL）
+- **TASK-09** - 复盘报表（时段胜率、盈亏比、滑点、费用）
+- **TASK-10** - 文档与契约同步（/docs 与 README 链接校验）
+
+详见 `/TASK_INDEX.md` 和 `/tasks/` 目录下的完整任务卡文件
 
 ---
 
