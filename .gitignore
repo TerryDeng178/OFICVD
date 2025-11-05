@@ -49,3 +49,8 @@ Thumbs.db
 *.csv
 !config/**/*.csv
 
+# Runtime data directories
+deploy/
+*.ndjson
+*.sidecar.json
+

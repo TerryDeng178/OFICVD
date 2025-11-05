@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HARVEST 采集层库 - 成熟实现（基于Task 1.2.5成功实现）
+成功版OFI+CVD数据采集脚本 (基于Task 1.2.5成功实现)
 使用正确的Binance Futures WebSocket URL格式
 """
 
@@ -60,14 +60,28 @@ def _env(name: str, default=None, cast=lambda v: v):
         return cast(val)
     return default
 
-# 添加项目路径（仅在开发模式）
+# 添加项目路径（自动检测，确保能找到 alpha_core 模块）
+# harvester.py 位于: src/alpha_core/ingestion/harvester.py
+# 路径层级: ingestion -> alpha_core -> src -> 项目根
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+# harvester.py: src/alpha_core/ingestion/harvester.py
+# 向上2级得到 src 目录（用于导入 alpha_core 包）
+SRC_DIR = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
+# 向上3级得到项目根目录
+PROJECT_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", "..", ".."))
+
+# 添加 src 目录到 Python 路径（如果不在 PYTHONPATH 中）
+# 这是最关键的路径，必须添加才能导入 alpha_core
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
+# 开发模式：额外添加候选路径（如果设置了 V13_DEV_PATHS）
 if _env("V13_DEV_PATHS", "0", str) == "1":
-    THIS_DIR = os.path.dirname(os.path.abspath(__file__))
     CANDIDATE_PATHS = [
         os.path.abspath(os.path.join(THIS_DIR, "..", "src")),
         os.path.abspath(os.path.join(THIS_DIR, "..", "..", "src")),
         os.path.abspath(os.path.join(THIS_DIR, "..", "..", "v13_ofi_ai_system", "src")),
-        os.path.abspath(os.path.join(THIS_DIR, "..")),
+        PROJECT_ROOT,
         THIS_DIR,
         os.getcwd(),
     ]
@@ -89,7 +103,12 @@ if _env("V13_DEV_PATHS", "0", str) == "1":
             logger.debug(f"dev path added: {p}")
 
 # 导入核心组件
+# 记录路径信息以便调试
+logger.debug(f"Python路径: {sys.path[:3]}")
+logger.debug(f"SRC_DIR: {SRC_DIR}, 存在: {os.path.exists(SRC_DIR)}")
+
 try:
+    # 尝试从 alpha_core 包导入（标准路径）
     from alpha_core.microstructure.ofi import RealOFICalculator, OFIConfig
     from alpha_core.microstructure.cvd import RealCVDCalculator, CVDConfig
     from alpha_core.microstructure.fusion import OFI_CVD_Fusion, OFICVDFusionConfig
@@ -98,31 +117,40 @@ try:
     CVD_AVAILABLE = True
     FUSION_AVAILABLE = True
     DIVERGENCE_AVAILABLE = True
-    logger.info("成功导入所有核心组件")
-except ImportError as e:
-    logger.warning(f"无法导入核心组件: {e}")
-    OFI_AVAILABLE = False
-    CVD_AVAILABLE = False
-    FUSION_AVAILABLE = False
-    DIVERGENCE_AVAILABLE = False
-    # 设置默认值
-    RealOFICalculator = None
-    OFIConfig = None
-    RealCVDCalculator = None
-    CVDConfig = None
-    OFI_CVD_Fusion = None
-    OFICVDFusionConfig = None
-    DivergenceDetector = None
-    DivergenceConfig = None
-
-# 导入路径构造器
-try:
-    from alpha_core.ingestion.path_utils import PathBuilder, KIND_RAW, KIND_PREVIEW
-    PATH_UTILS_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"无法导入路径构造器: {e}")
-    PATH_UTILS_AVAILABLE = False
-    PathBuilder = None
+    logger.info("✓ 成功从 alpha_core 包导入所有核心组件")
+except ImportError as e1:
+    logger.warning(f"无法从 alpha_core 包导入核心组件: {e1}")
+    logger.debug(f"SRC_DIR={SRC_DIR}, alpha_core路径={os.path.join(SRC_DIR, 'alpha_core') if SRC_DIR else 'N/A'}")
+    try:
+        # 降级：尝试直接导入模块（兼容旧路径）
+        from real_ofi_calculator import RealOFICalculator, OFIConfig
+        from real_cvd_calculator import RealCVDCalculator, CVDConfig
+        from ofi_cvd_fusion import OFI_CVD_Fusion, OFICVDFusionConfig
+        from ofi_cvd_divergence import DivergenceDetector, DivergenceConfig
+        OFI_AVAILABLE = True
+        CVD_AVAILABLE = True
+        FUSION_AVAILABLE = True
+        DIVERGENCE_AVAILABLE = True
+        logger.info("✓ 成功直接导入所有核心组件（降级模式）")
+    except ImportError as e2:
+        logger.error(f"✗ 无法导入核心组件: {e2}")
+        logger.error(f"   标准导入失败: {e1}")
+        logger.error(f"   降级导入失败: {e2}")
+        logger.error(f"   请检查: 1) src/alpha_core/microstructure/* 模块是否存在")
+        logger.error(f"           2) Python路径是否正确 (SRC_DIR={SRC_DIR})")
+        OFI_AVAILABLE = False
+        CVD_AVAILABLE = False
+        FUSION_AVAILABLE = False
+        DIVERGENCE_AVAILABLE = False
+        # 设置默认值
+        RealOFICalculator = None
+        OFIConfig = None
+        RealCVDCalculator = None
+        CVDConfig = None
+        OFI_CVD_Fusion = None
+        OFICVDFusionConfig = None
+        DivergenceDetector = None
+        DivergenceConfig = None
 
 # 稳定hash函数
 def stable_row_id(s):
@@ -148,22 +176,23 @@ class SuccessOFICVDHarvester:
         self._compat_env = compat_env
         
         # 基础目录和时间（所有模式都需要）
-        self.base_dir = Path(__file__).parent.parent.parent.parent.absolute()  # 项目根目录
+        # 计算项目根目录：harvester.py 位于 src/alpha_core/ingestion/harvester.py
+        # parents[3] = ingestion -> alpha_core -> src -> project_root
+        self.project_root = Path(__file__).resolve().parents[3]
+        self.deploy_root = self.project_root / "deploy"
+        self.base_dir = Path(__file__).parent.absolute()
         self.run_hours = run_hours
         self.start_time = datetime.now().timestamp()
         self.end_time = self.start_time + (run_hours * 3600)
         
+        # 生成唯一 writerid（用于文件命名和 DQ 报告）
+        self.writerid = uuid.uuid4().hex[:8]
+        
         # 第3步：从cfg映射所有字段（在_apply_cfg中实现）
         self._apply_cfg(symbols, output_dir)
         
-        # 预览/权威分仓配置（使用新的kind定义）
-        if PATH_UTILS_AVAILABLE:
-            self.preview_kinds = KIND_PREVIEW
-            self.raw_kinds = KIND_RAW
-        else:
-            # 降级到旧定义
-            self.preview_kinds = {'ofi', 'cvd', 'fusion', 'events', 'features'}
-            self.raw_kinds = {'prices', 'orderbook'}
+        # 预览/权威分仓配置
+        self.preview_kinds = {'ofi', 'cvd', 'fusion', 'events', 'features'}
         
         # 创建输出目录结构
         self._create_directory_structure()
@@ -181,8 +210,9 @@ class SuccessOFICVDHarvester:
         # 极端流量保护：动态轮转间隔
         self.extreme_traffic_mode = False
         
-        # 死信（deadletter）目录（已在_apply_cfg中设置artifacts_root，这里不需要额外创建）
-        # 新路径系统会在使用时自动创建
+        # 死信（deadletter）目录（已在_apply_cfg中设置artifacts_dir，这里只需创建子目录）
+        self.deadletter_dir = self.artifacts_dir / "deadletter"
+        self.deadletter_dir.mkdir(parents=True, exist_ok=True)
         
         # 订单簿缓存
         self.orderbooks = {symbol: {} for symbol in self.symbols}
@@ -221,58 +251,92 @@ class SuccessOFICVDHarvester:
         self.fusion_calculators = {}
         self.divergence_detectors = {}
         
+        # 组件可用性标志（实例变量，用于运行时检查）
+        self.ofi_available = OFI_AVAILABLE and RealOFICalculator is not None and OFIConfig is not None
+        self.cvd_available = CVD_AVAILABLE and RealCVDCalculator is not None and CVDConfig is not None
+        self.fusion_available = FUSION_AVAILABLE and OFI_CVD_Fusion is not None and OFICVDFusionConfig is not None
+        self.divergence_available = DIVERGENCE_AVAILABLE and DivergenceDetector is not None and DivergenceConfig is not None
+        
         # OFI计算器
-        if OFI_AVAILABLE:
-            for symbol in self.symbols:
-                config = OFIConfig(
-                    levels=5,
-                    z_window=100,
-                    ema_alpha=0.1
-                )
-                self.ofi_calculators[symbol] = RealOFICalculator(symbol, config)
+        if self.ofi_available:
+            try:
+                for symbol in self.symbols:
+                    config = OFIConfig(
+                        levels=5,
+                        z_window=100,
+                        ema_alpha=0.1
+                    )
+                    self.ofi_calculators[symbol] = RealOFICalculator(symbol, config)
+                logger.info(f"✓ OFI计算器初始化成功: {len(self.ofi_calculators)}个symbol")
+            except Exception as e:
+                logger.error(f"✗ OFI计算器初始化失败: {e}")
+                self.ofi_available = False
+        else:
+            logger.warning("✗ OFI计算器不可用，将使用备用计算")
         
         # CVD计算器
-        if CVD_AVAILABLE:
-            for symbol in self.symbols:
-                config = CVDConfig(
-                    z_window=150,
-                    ema_alpha=0.2,
-                    use_tick_rule=True,
-                    warmup_min=3
-                )
-                self.cvd_calculators[symbol] = RealCVDCalculator(symbol, config)
+        if self.cvd_available:
+            try:
+                for symbol in self.symbols:
+                    config = CVDConfig(
+                        z_window=150,
+                        ema_alpha=0.2,
+                        use_tick_rule=True,
+                        warmup_min=3
+                    )
+                    self.cvd_calculators[symbol] = RealCVDCalculator(symbol, config)
+                logger.info(f"✓ CVD计算器初始化成功: {len(self.cvd_calculators)}个symbol")
+            except Exception as e:
+                logger.error(f"✗ CVD计算器初始化失败: {e}")
+                self.cvd_available = False
+        else:
+            logger.warning("✗ CVD计算器不可用，将使用备用计算")
         
         # 融合计算器
-        if FUSION_AVAILABLE:
-            for symbol in self.symbols:
-                config = OFICVDFusionConfig(
-                    w_ofi=0.6,
-                    w_cvd=0.4,
-                    fuse_buy=1.2,
-                    fuse_strong_buy=2.0,
-                    fuse_sell=-1.2,
-                    fuse_strong_sell=-2.0,
-                    min_consistency=0.2,
-                    strong_min_consistency=0.6
-                )
-                self.fusion_calculators[symbol] = OFI_CVD_Fusion(config)
+        if self.fusion_available:
+            try:
+                for symbol in self.symbols:
+                    config = OFICVDFusionConfig(
+                        w_ofi=0.6,
+                        w_cvd=0.4,
+                        fuse_buy=1.2,
+                        fuse_strong_buy=2.0,
+                        fuse_sell=-1.2,
+                        fuse_strong_sell=-2.0,
+                        min_consistency=0.2,
+                        strong_min_consistency=0.6
+                    )
+                    self.fusion_calculators[symbol] = OFI_CVD_Fusion(config)
+                logger.info(f"✓ 融合计算器初始化成功: {len(self.fusion_calculators)}个symbol")
+            except Exception as e:
+                logger.error(f"✗ 融合计算器初始化失败: {e}")
+                self.fusion_available = False
+        else:
+            logger.warning("✗ 融合计算器不可用，将使用备用计算")
         
         # 背离检测器
-        if DIVERGENCE_AVAILABLE:
-            for symbol in self.symbols:
-                config = DivergenceConfig(
-                    swing_L=12,
-                    ema_k=5,
-                    z_hi=1.5,
-                    z_mid=0.7,
-                    min_separation=6,
-                    cooldown_secs=1.0,
-                    warmup_min=100,
-                    max_lag=0.300,
-                    use_fusion=True,
-                    cons_min=0.3
-                )
-                self.divergence_detectors[symbol] = DivergenceDetector(config)
+        if self.divergence_available:
+            try:
+                for symbol in self.symbols:
+                    config = DivergenceConfig(
+                        swing_L=12,
+                        ema_k=5,
+                        z_hi=1.5,
+                        z_mid=0.7,
+                        min_separation=6,
+                        cooldown_secs=1.0,
+                        warmup_min=100,
+                        max_lag=0.300,
+                        use_fusion=True,
+                        cons_min=0.3
+                    )
+                    self.divergence_detectors[symbol] = DivergenceDetector(config)
+                logger.info(f"✓ 背离检测器初始化成功: {len(self.divergence_detectors)}个symbol")
+            except Exception as e:
+                logger.error(f"✗ 背离检测器初始化失败: {e}")
+                self.divergence_available = False
+        else:
+            logger.warning("✗ 背离检测器不可用，将使用备用检测")
         
         # 统计信息
         self.stats = {
@@ -342,7 +406,10 @@ class SuccessOFICVDHarvester:
             }
         
         logger.info(f"初始化成功版采集器: {self.symbols}, 支持7x24小时连续运行")
-        logger.info(f"OFI计算器状态: {'可用' if OFI_AVAILABLE else '不可用'}")
+        logger.info(f"OFI计算器状态: {'可用' if self.ofi_available else '不可用'}")
+        logger.info(f"CVD计算器状态: {'可用' if self.cvd_available else '不可用'}")
+        logger.info(f"融合计算器状态: {'可用' if self.fusion_available else '不可用'}")
+        logger.info(f"背离检测器状态: {'可用' if self.divergence_available else '不可用'}")
         logger.info(f"场景标签配置: WIN_SECS={self.win_secs}, ACTIVE_TPS={self.active_tps}, VOL_SPLIT={self.vol_split}")
         logger.info(f"补丁A配置: STREAM_IDLE_SEC={self.stream_idle_sec}, TRADE_TIMEOUT={self.trade_timeout}, ORDERBOOK_TIMEOUT={self.orderbook_timeout}")
         logger.info(f"退避复位配置: BACKOFF_RESET_SECS={self.backoff_reset_secs}秒")
@@ -366,6 +433,10 @@ class SuccessOFICVDHarvester:
         # 生成run_manifest（增强可复现性）
         self._generate_run_manifest()
     
+    def _norm_symbol(self, s: str) -> str:
+        """归一化 symbol 为小写（用于目录命名和路径生成）"""
+        return (s or "").strip().lower()
+    
     def _apply_cfg(self, symbols=None, output_dir=None):
         """
         第3步：从cfg映射所有字段（引入默认值）
@@ -381,31 +452,22 @@ class SuccessOFICVDHarvester:
             # 向后兼容：从环境变量读取
             self.symbols = symbols or os.getenv('SYMBOLS', 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT').split(',')
             
-            # 使用新的路径规范（支持环境变量）
-            data_root_env = os.getenv('OFICVD_DATA_ROOT', str(self.base_dir / "deploy" / "data" / "ofi_cvd"))
-            artifacts_root_env = os.getenv('OFICVD_ARTIFACTS_ROOT', str(self.base_dir / "deploy" / "artifacts" / "ofi_cvd"))
-            timezone_cfg = os.getenv('OFICVD_TIMEZONE', 'UTC')
-            
-            # 兼容旧的 OUTPUT_DIR 环境变量
+            # 兼容 env 模式默认路径改为基于 deploy_root
             if output_dir is None:
-                output_dir = os.getenv('OUTPUT_DIR')
-            if output_dir:
-                # 如果设置了旧的 OUTPUT_DIR，使用它作为 data_root
-                data_root_env = output_dir
+                output_dir = os.getenv('OUTPUT_DIR', str(self.deploy_root / "data" / "ofi_cvd"))
+            self.output_dir = Path(output_dir)
             
-            self.data_root = Path(data_root_env)
-            self.artifacts_root = Path(artifacts_root_env)
-            self.timezone = timezone_cfg
-            
-            # 初始化 PathBuilder
-            if PATH_UTILS_AVAILABLE:
-                self.path_builder = PathBuilder(str(self.data_root), str(self.artifacts_root), self.timezone)
+            preview_dir_env = os.getenv('PREVIEW_DIR')
+            if preview_dir_env:
+                self.preview_dir = Path(preview_dir_env)
             else:
-                self.path_builder = None
-                # 降级：使用旧路径
-                self.output_dir = self.data_root
-                self.preview_dir = self.base_dir / "preview" / "ofi_cvd"
-                self.artifacts_dir = self.artifacts_root
+                self.preview_dir = self.deploy_root / "preview" / "ofi_cvd"
+            
+            artifacts_dir_env = os.getenv('ARTIFACTS_DIR')
+            if artifacts_dir_env:
+                self.artifacts_dir = Path(artifacts_dir_env)
+            else:
+                self.artifacts_dir = self.deploy_root / "artifacts" / "ofi_cvd"
             
             # 从环境变量读取所有配置
             self.buffer_high = {
@@ -462,49 +524,43 @@ class SuccessOFICVDHarvester:
                 self.symbols = symbols  # 命令行参数优先
             
             paths = c.get("paths", {})
-            base_dir = self.base_dir
             
-            # 使用新的路径规范
-            data_root_cfg = paths.get("data_root", "./deploy/data/ofi_cvd")
-            artifacts_root_cfg = paths.get("artifacts_root", "./deploy/artifacts/ofi_cvd")
-            timezone_cfg = paths.get("timezone", "UTC")
+            # 统一路径锚点：deploy_root（默认：PROJECT_ROOT/deploy）
+            deploy_root_cfg = paths.get("deploy_root")
+            if deploy_root_cfg:
+                self.deploy_root = Path(deploy_root_cfg) if Path(deploy_root_cfg).is_absolute() \
+                                   else self.project_root / deploy_root_cfg
+            else:
+                self.deploy_root = self.project_root / "deploy"
             
-            # 解析环境变量（支持 ${VAR:default} 格式）
-            import re
-            def resolve_env_var(value):
-                match = re.match(r'\$\{([^:]+):([^}]+)\}', value)
-                if match:
-                    var_name, default = match.groups()
-                    return os.getenv(var_name, default)
-                return value
-            
-            data_root_cfg = resolve_env_var(data_root_cfg)
-            artifacts_root_cfg = resolve_env_var(artifacts_root_cfg)
-            
-            # 兼容旧的 output_dir 参数
+            # 相对路径全部挂到 deploy_root
+            output_dir_cfg = paths.get("output_dir", "data/ofi_cvd")
             if output_dir is not None:
-                self.data_root = Path(output_dir)
-            elif not Path(data_root_cfg).is_absolute():
-                self.data_root = base_dir / data_root_cfg
+                self.output_dir = Path(output_dir)
             else:
-                self.data_root = Path(data_root_cfg)
+                self.output_dir = Path(output_dir_cfg) if Path(output_dir_cfg).is_absolute() \
+                                  else self.deploy_root / output_dir_cfg
+            # 强制确保 output_dir 末级是 ofi_cvd
+            if not str(self.output_dir).endswith("ofi_cvd"):
+                self.output_dir = self.output_dir / "ofi_cvd"
             
-            if not Path(artifacts_root_cfg).is_absolute():
-                self.artifacts_root = base_dir / artifacts_root_cfg
-            else:
-                self.artifacts_root = Path(artifacts_root_cfg)
+            preview_dir_cfg = paths.get("preview_dir", "preview/ofi_cvd")
+            self.preview_dir = Path(preview_dir_cfg) if Path(preview_dir_cfg).is_absolute() \
+                               else self.deploy_root / preview_dir_cfg
+            # 强制确保 preview_dir 末级是 ofi_cvd
+            if not str(self.preview_dir).endswith("ofi_cvd"):
+                self.preview_dir = self.preview_dir / "ofi_cvd"
             
-            self.timezone = timezone_cfg
+            artifacts_dir_cfg = paths.get("artifacts_dir", "artifacts/ofi_cvd")
+            self.artifacts_dir = Path(artifacts_dir_cfg) if Path(artifacts_dir_cfg).is_absolute() \
+                                 else self.deploy_root / artifacts_dir_cfg
+            # 强制确保 artifacts_dir 末级是 ofi_cvd
+            if not str(self.artifacts_dir).endswith("ofi_cvd"):
+                self.artifacts_dir = self.artifacts_dir / "ofi_cvd"
             
-            # 初始化 PathBuilder
-            if PATH_UTILS_AVAILABLE:
-                self.path_builder = PathBuilder(str(self.data_root), str(self.artifacts_root), self.timezone)
-            else:
-                self.path_builder = None
-                # 降级：使用旧路径
-                self.output_dir = self.data_root
-                self.preview_dir = base_dir / "preview" / "ofi_cvd"
-                self.artifacts_dir = self.artifacts_root
+            logger.info(f"paths resolved → deploy_root={self.deploy_root}, "
+                        f"output_dir={self.output_dir}, preview_dir={self.preview_dir}, "
+                        f"artifacts_dir={self.artifacts_dir}")
             
             # 2) 缓存/并发/文件旋转
             bufs = c.get("buffers", {})
@@ -623,8 +679,7 @@ class SuccessOFICVDHarvester:
                 'config': {
                     'symbols': self.symbols,
                     'run_hours': self.run_hours,
-                    'data_root': str(getattr(self, 'data_root', getattr(self, 'output_dir', ''))),
-                    'artifacts_root': str(getattr(self, 'artifacts_root', getattr(self, 'artifacts_dir', ''))),
+                    'output_dir': str(self.output_dir),
                     'win_secs': self.win_secs,
                     'active_tps': self.active_tps,
                     'vol_split': self.vol_split,
@@ -633,10 +688,16 @@ class SuccessOFICVDHarvester:
                     'dedup_lru_size': self.dedup_lru_size
                 },
                 'components': {
-                    'ofi_available': OFI_AVAILABLE,
-                    'cvd_available': CVD_AVAILABLE,
-                    'fusion_available': FUSION_AVAILABLE,
-                    'divergence_available': DIVERGENCE_AVAILABLE
+                    'ofi_available': getattr(self, 'ofi_available', OFI_AVAILABLE),
+                    'cvd_available': getattr(self, 'cvd_available', CVD_AVAILABLE),
+                    'fusion_available': getattr(self, 'fusion_available', FUSION_AVAILABLE),
+                    'divergence_available': getattr(self, 'divergence_available', DIVERGENCE_AVAILABLE),
+                    'module_level': {
+                        'ofi_available': OFI_AVAILABLE,
+                        'cvd_available': CVD_AVAILABLE,
+                        'fusion_available': FUSION_AVAILABLE,
+                        'divergence_available': DIVERGENCE_AVAILABLE
+                    }
                 },
                 'environment': {
                     'python_version': sys.version,
@@ -655,42 +716,56 @@ class SuccessOFICVDHarvester:
                 }
             }
             
-            # T5: 汇总DQ报告摘要
+            # T5: 汇总 DQ 报告统计（按 kind 类型）
+            dq_reports_dir = self.artifacts_dir / "dq_reports"
             dq_summary = {}
-            artifacts_dir = getattr(self, 'artifacts_root', getattr(self, 'artifacts_dir', self.base_dir / "artifacts"))
-            dq_reports_dir = artifacts_dir / "dq_reports"
             if dq_reports_dir.exists():
-                # 读取所有DQ报告文件
-                dq_files = list(dq_reports_dir.glob("dq_*.json"))
-                if dq_files:
-                    # 按kind汇总ok/bad行数
-                    for kind in ['prices', 'orderbook', 'ofi', 'cvd', 'fusion', 'events', 'features']:
-                        kind_total_ok = 0
-                        kind_total_bad = 0
-                        for dq_file in dq_files:
-                            if f"_{kind}_" in dq_file.name:
-                                try:
-                                    with open(dq_file, 'r', encoding='utf-8') as f:
-                                        dq_data = json.load(f)
-                                        if dq_data.get('kind') == kind:
-                                            kind_total_ok += dq_data.get('ok_rows', 0)
-                                            kind_total_bad += dq_data.get('bad_rows', 0)
-                                except Exception as e:
-                                    logger.warning(f"读取DQ报告失败 {dq_file}: {e}")
-                        if kind_total_ok > 0 or kind_total_bad > 0:
-                            dq_summary[kind] = {
-                                'ok_rows': kind_total_ok,
-                                'bad_rows': kind_total_bad,
-                                'total_rows': kind_total_ok + kind_total_bad,
-                                'bad_ratio': kind_total_bad / (kind_total_ok + kind_total_bad) if (kind_total_ok + kind_total_bad) > 0 else 0.0
-                            }
+                try:
+                    # 收集所有 DQ 报告文件
+                    dq_files = list(dq_reports_dir.rglob("dq-*.json"))
+                    kind_stats = {}
+                    
+                    for dq_file in dq_files:
+                        try:
+                            with open(dq_file, 'r', encoding='utf-8') as f:
+                                dq_report = json.load(f)
+                                kind = dq_report.get('kind', 'unknown')
+                                
+                                if kind not in kind_stats:
+                                    kind_stats[kind] = {
+                                        'total_ok_rows': 0,
+                                        'total_bad_rows': 0,
+                                        'report_count': 0
+                                    }
+                                
+                                kind_stats[kind]['total_ok_rows'] += dq_report.get('ok_rows', 0)
+                                kind_stats[kind]['total_bad_rows'] += dq_report.get('bad_rows', 0)
+                                kind_stats[kind]['report_count'] += 1
+                        except Exception as e:
+                            logger.warning(f"读取DQ报告文件失败 {dq_file}: {e}")
+                    
+                    # 计算坏数据比例
+                    for kind, stats in kind_stats.items():
+                        total_rows = stats['total_ok_rows'] + stats['total_bad_rows']
+                        bad_ratio = (stats['total_bad_rows'] / total_rows * 100) if total_rows > 0 else 0.0
+                        
+                        dq_summary[kind] = {
+                            'ok_rows': stats['total_ok_rows'],
+                            'bad_rows': stats['total_bad_rows'],
+                            'total_rows': total_rows,
+                            'bad_ratio': round(bad_ratio, 4),
+                            'report_count': stats['report_count']
+                        }
+                    
+                    logger.info(f"[DQ_SUMMARY] 汇总了 {len(kind_stats)} 种类型的 DQ 报告")
+                except Exception as e:
+                    logger.warning(f"汇总DQ报告时出错: {e}")
             
-            manifest['dq_summary'] = dq_summary
+            manifest['dq_summary'] = dq_summary if dq_summary else {}
             
             # 保存manifest文件（使用固定的artifacts目录）
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            artifacts_dir = getattr(self, 'artifacts_root', getattr(self, 'artifacts_dir', self.base_dir / "artifacts"))
-            manifest_file = artifacts_dir / "run_logs" / f"run_manifest_{timestamp}.json"
+            manifest_file = self.artifacts_dir / "run_logs" / f"run_manifest_{timestamp}.json"
             manifest_file.parent.mkdir(parents=True, exist_ok=True)
             
             with open(manifest_file, 'w', encoding='utf-8') as f:
@@ -840,16 +915,10 @@ class SuccessOFICVDHarvester:
     
     def _spill_to_deadletter(self, symbol: str, kind: str, rows):
         try:
-            ts_ms = int(time.time() * 1000)
-            if self.path_builder:
-                path = self.path_builder.deadletter_path(ts_ms, symbol, kind)
-            else:
-                # 降级：使用旧路径
-                deadletter_dir = getattr(self, 'deadletter_dir', self.artifacts_root / "deadletter")
-                ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                path = deadletter_dir / kind / f"{symbol}_{ts}_{len(rows)}.ndjson"
-                path.parent.mkdir(parents=True, exist_ok=True)
-            
+            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            sym = self._norm_symbol(symbol)
+            path = self.deadletter_dir / kind / f"{sym}_{ts}_{len(rows)}.ndjson"
+            path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
                 for r in rows:
                     f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -862,11 +931,55 @@ class SuccessOFICVDHarvester:
             logger.error(f"[DEADLETTER] 写入失败 {symbol}-{kind}: {e}")
     
     def _create_directory_structure(self):
-        """创建目录结构（新路径系统会在使用时自动创建，这里仅保留兼容逻辑）"""
-        # 新路径系统使用 PathBuilder，会在写入时自动创建目录
-        # 这里保留基本目录创建以确保兼容性
-        if hasattr(self, 'artifacts_root'):
-            (self.artifacts_root / "run_logs").mkdir(parents=True, exist_ok=True)
+        """创建目录结构"""
+        # 先创建 /deploy 与三套固定子目录（幂等）
+        self.deploy_root.mkdir(parents=True, exist_ok=True)
+        logger.info(f"创建 deploy 根目录: {self.deploy_root}")
+        
+        # 创建固定的子目录结构（幂等）
+        data_base = self.deploy_root / "data"
+        preview_base = self.deploy_root / "preview"
+        artifacts_base = self.deploy_root / "artifacts"
+        
+        data_base.mkdir(parents=True, exist_ok=True)
+        preview_base.mkdir(parents=True, exist_ok=True)
+        artifacts_base.mkdir(parents=True, exist_ok=True)
+        logger.debug(f"创建固定子目录: data={data_base}, preview={preview_base}, artifacts={artifacts_base}")
+        
+        # 确保 ofi_cvd 子目录存在
+        (data_base / "ofi_cvd").mkdir(parents=True, exist_ok=True)
+        (preview_base / "ofi_cvd").mkdir(parents=True, exist_ok=True)
+        (artifacts_base / "ofi_cvd").mkdir(parents=True, exist_ok=True)
+        logger.debug("创建 ofi_cvd 子目录")
+        
+        # 创建 artifacts 的固定子目录
+        (self.artifacts_dir / "run_logs").mkdir(parents=True, exist_ok=True)
+        (self.artifacts_dir / "dq_reports").mkdir(parents=True, exist_ok=True)
+        (self.artifacts_dir / "deadletter").mkdir(parents=True, exist_ok=True)
+        logger.debug(f"创建 artifacts 子目录: {self.artifacts_dir}")
+        
+        # 再创建日期分区（使用UTC时间确保与数据分区一致）
+        today_utc = datetime.utcnow().strftime("%Y-%m-%d")
+        current_hour = datetime.utcnow().strftime("%H")
+        
+        for symbol in self.symbols:
+            sym = self._norm_symbol(symbol)
+            # 权威库：只保留 raw（prices/orderbook）
+            for kind in ['prices', 'orderbook']:
+                # 创建日期+小时分区目录
+                dir_path = self.output_dir / f"date={today_utc}" / f"hour={current_hour}" / f"symbol={sym}" / f"kind={kind}"
+                dir_path.mkdir(parents=True, exist_ok=True)
+            # 预览库
+            for kind in self.preview_kinds:
+                # 创建日期+小时分区目录
+                dir_path = self.preview_dir / f"date={today_utc}" / f"hour={current_hour}" / f"symbol={sym}" / f"kind={kind}"
+                dir_path.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"目录结构已创建: deploy_root={self.deploy_root}")
+        logger.info(f"  - data: {self.output_dir}")
+        logger.info(f"  - preview: {self.preview_dir}")
+        logger.info(f"  - artifacts: {self.artifacts_dir}")
+        logger.info(f"  - 当日分区: date={today_utc}, hour={current_hour}")
     
     def _pick_orderbook_snapshot(self, symbol: str, trade_ts_ms: int, max_lag_ms: int = 250) -> Optional[Dict]:
         """选择最接近交易时间的订单簿快照（用于时间对齐）"""
@@ -1032,7 +1145,7 @@ class SuccessOFICVDHarvester:
                 return None
             
             # 使用RealOFICalculator核心组件
-            if OFI_AVAILABLE and symbol in self.ofi_calculators:
+            if self.ofi_available and symbol in self.ofi_calculators:
                 result = self.ofi_calculators[symbol].update_with_snapshot(
                     orderbook['bids'], 
                     orderbook['asks'],
@@ -1100,7 +1213,7 @@ class SuccessOFICVDHarvester:
             event_ts_ms = int(trade_data.get('event_ts_ms', 0))
             
             # 使用RealCVDCalculator核心组件（增加异常保护）
-            if CVD_AVAILABLE and symbol in self.cvd_calculators:
+            if self.cvd_available and symbol in self.cvd_calculators:
                 try:
                     result = self.cvd_calculators[symbol].update_with_trade(
                         price=price,
@@ -1214,7 +1327,7 @@ class SuccessOFICVDHarvester:
                 return None
             
             # 使用OFI_CVD_Fusion核心组件
-            if FUSION_AVAILABLE and symbol and symbol in self.fusion_calculators:
+            if self.fusion_available and symbol and symbol in self.fusion_calculators:
                 result = self.fusion_calculators[symbol].update(
                     z_ofi=ofi_z,
                     z_cvd=cvd_z,
@@ -1296,7 +1409,7 @@ class SuccessOFICVDHarvester:
                 return events
             
             # 使用DivergenceDetector核心组件
-            if DIVERGENCE_AVAILABLE and symbol in self.divergence_detectors:
+            if self.divergence_available and symbol in self.divergence_detectors:
                 fusion_score = fusion_result.get('score', 0.0) if fusion_result else None
                 consistency = fusion_result.get('consistency', 0.0) if fusion_result else None
                 
@@ -1800,52 +1913,70 @@ class SuccessOFICVDHarvester:
             # 创建DataFrame
             df = pd.DataFrame(buf)
             
-            # 数据清洗：统一NaN/inf处理与类型锚定
+            # 数据清洗：统一NaN/inf处理
             df = df.replace([np.inf, -np.inf], np.nan)
             
-            # T3: DQ Gate 数据质量检查
-            from alpha_core.ingestion.dq_gate import dq_gate_df, save_dq_report, save_bad_data_to_deadletter, PREVIEW_COLUMNS
-            ok_df, bad_df, dq_report = dq_gate_df(kind, df)
-            
-            # 保存DQ报告（使用新路径系统）
-            if dq_report['bad_rows'] > 0:
-                ts_ms = int(df['ts_ms'].min()) if not df.empty else int(time.time() * 1000)
-                if self.path_builder:
-                    dq_report_path = self.path_builder.dq_report_path(ts_ms, symbol, kind)
-                    dq_report_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(dq_report_path, 'w', encoding='utf-8') as f:
-                        json.dump(dq_report, f, indent=2, ensure_ascii=False)
-                else:
-                    # 降级：使用旧方法
-                    save_dq_report(dq_report, getattr(self, 'artifacts_dir', self.artifacts_root), symbol, kind)
+            # T3: DQ Gate 数据质量检查（在类型锚定前执行）
+            try:
+                from alpha_core.ingestion.dq_gate import dq_gate_df, save_dq_report, save_bad_data_to_deadletter
                 
-                # 保存坏数据到deadletter
-                if self.path_builder:
-                    deadletter_path = self.path_builder.deadletter_path(ts_ms, symbol, kind)
+                ok_df, bad_df, dq_report = dq_gate_df(kind, df)
+                
+                # 如果有坏数据，保存 DQ 报告和死信文件
+                if dq_report['bad_rows'] > 0:
+                    # 计算时间戳（使用数据的最小时间戳）
+                    ts_ms = int(df['ts_ms'].min()) if 'ts_ms' in df.columns and not df.empty else int(time.time() * 1000)
+                    sym = self._norm_symbol(symbol)
+                    
+                    # 生成日期+小时分区
+                    dt = datetime.fromtimestamp(ts_ms / 1000, tz=datetime.timezone.utc)
+                    date_str = dt.strftime('%Y-%m-%d')
+                    hour_str = dt.strftime('%H')
+                    
+                    # 保存 DQ 报告
+                    dq_reports_dir = self.artifacts_dir / "dq_reports" / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}"
+                    dq_reports_dir.mkdir(parents=True, exist_ok=True)
+                    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')
+                    writerid = getattr(self, 'writerid', uuid.uuid4().hex[:8])
+                    dq_report_file = dq_reports_dir / f"dq-{ts_ms}-{writerid}.json"
+                    
+                    with open(dq_report_file, 'w', encoding='utf-8') as f:
+                        json.dump(dq_report, f, indent=2, ensure_ascii=False)
+                    
+                    # 保存坏数据到 deadletter
                     if not bad_df.empty:
-                        with open(deadletter_path, 'w', encoding='utf-8') as f:
+                        deadletter_dir = self.artifacts_dir / "deadletter" / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}"
+                        deadletter_dir.mkdir(parents=True, exist_ok=True)
+                        deadletter_file = deadletter_dir / f"bad-{ts_ms}-{writerid}.ndjson"
+                        
+                        with open(deadletter_file, 'w', encoding='utf-8') as f:
                             for _, row in bad_df.iterrows():
                                 record = row.to_dict()
+                                # 处理NaN值
                                 for k, v in record.items():
                                     if pd.isna(v):
                                         record[k] = None
                                 json.dump(record, f, ensure_ascii=False)
                                 f.write('\n')
-                else:
-                    # 降级：使用旧方法
-                    deadletter_dir = getattr(self, 'deadletter_dir', self.artifacts_root / "deadletter")
-                    save_bad_data_to_deadletter(bad_df, deadletter_dir, symbol, kind)
-                logger.warning(f"[DQ_GATE] {symbol}-{kind}: {dq_report['bad_rows']}坏数据已分流到deadletter, "
-                             f"合格数据: {dq_report['ok_rows']}")
-            
-            # 使用合格数据继续处理
-            df = ok_df
-            if df.empty:
-                logger.debug(f"[DQ_GATE] {symbol}-{kind}: 所有数据被DQ Gate过滤，跳过落盘")
-                return
-            
-            # T5: 添加schema_version元信息
-            df['schema_version'] = 'preagg_meta/v1'
+                        
+                        logger.warning(f"[DQ_GATE] {symbol}-{kind}: {dq_report['bad_rows']}坏数据已分流到deadletter, "
+                                     f"合格数据: {dq_report['ok_rows']}, 报告: {dq_report_file.name}")
+                    else:
+                        logger.warning(f"[DQ_GATE] {symbol}-{kind}: {dq_report['bad_rows']}坏数据（已过滤）, "
+                                     f"合格数据: {dq_report['ok_rows']}, 报告: {dq_report_file.name}")
+                
+                # 使用合格数据继续后续处理
+                df = ok_df
+                if df.empty:
+                    logger.debug(f"[DQ_GATE] {symbol}-{kind}: 所有数据被DQ Gate过滤，跳过落盘")
+                    return
+                    
+            except ImportError as e:
+                logger.warning(f"[DQ_GATE] 无法导入DQ Gate模块: {e}，跳过DQ检查")
+                # 继续使用原始 df
+            except Exception as e:
+                logger.error(f"[DQ_GATE] DQ检查失败 {symbol}-{kind}: {e}，继续使用原始数据")
+                # 继续使用原始 df
             
             # 数值列类型锚定（补充更多可能出现的数值列）
             numeric_columns = ['ofi_z', 'z_raw', 'z_cvd', 'score', 'proba', 'consistency', 
@@ -1872,22 +2003,39 @@ class SuccessOFICVDHarvester:
                 if col in df.columns:
                     df[col] = df[col].astype('boolean')
             
-            # 确定 layer（raw/preview）
-            layer = 'preview' if kind in self.preview_kinds else 'raw'
+            # T5: 添加 schema_version 元数据（在保存前）
+            df['schema_version'] = 'preagg_meta/v1'
             
-            # T4: Preview 列裁剪（RAW→Preview）
-            if kind in self.preview_kinds:
-                # Preview库：只保留白名单列
-                preview_cols = PREVIEW_COLUMNS.get(kind, [])
-                available_cols = [c for c in preview_cols if c in df.columns]
-                # 保留分区列和元信息列
-                partition_cols = ['schema_version']
-                available_cols = available_cols + [c for c in partition_cols if c in df.columns]
-                df = df[available_cols]
-            else:
-                # RAW库：保持现状，但剔除策略/监控列
+            # 按事件时间分区，避免跨日错桶（使用UTC时间确保一致性）
+            df['date'] = pd.to_datetime(df['ts_ms'], unit='ms', utc=True).dt.strftime('%Y-%m-%d')
+            df['hour'] = pd.to_datetime(df['ts_ms'], unit='ms', utc=True).dt.strftime('%H')  # 新增小时分区
+            
+            # 路由输出路径，并打上 source_tier
+            df['source_tier'] = 'preview' if kind in self.preview_kinds else 'raw'
+            base_dir = self.preview_dir if kind in self.preview_kinds else self.output_dir
+            
+            # 归一化 symbol 为小写（用于目录命名）
+            sym = self._norm_symbol(symbol)
+            
+            # 按日期+小时分组保存
+            for (date_str, hour_str), time_group in df.groupby(['date', 'hour']):
+                # T4: Preview 列裁剪（仅对 preview_kinds）
+                if kind in self.preview_kinds:
+                    try:
+                        from alpha_core.ingestion.dq_gate import PREVIEW_COLUMNS
+                        preview_cols = PREVIEW_COLUMNS.get(kind, [])
+                        # 保留白名单列 + schema_version（元数据列）
+                        available_cols = [c for c in preview_cols + ['schema_version'] if c in time_group.columns]
+                        if available_cols:
+                            time_group = time_group[available_cols]
+                            logger.debug(f"[PREVIEW_CROP] {symbol}-{kind}: 列裁剪后 {len(available_cols)} 列")
+                    except ImportError:
+                        logger.warning(f"[PREVIEW_CROP] 无法导入PREVIEW_COLUMNS，跳过列裁剪")
+                    except Exception as e:
+                        logger.warning(f"[PREVIEW_CROP] 列裁剪失败 {symbol}-{kind}: {e}，使用原始列")
+                # raw 仓剔除策略/监控列（避免把参数相关字段写死进权威库）
                 if kind == 'prices':
-                    df = df.drop(
+                    time_group = time_group.drop(
                         columns=['session','regime','vol_bucket','scenario_2x2','fee_tier','recv_rate_tps'],
                         errors='ignore'
                     )
@@ -1895,175 +2043,31 @@ class SuccessOFICVDHarvester:
                 # 修复orderbook复杂列导致的Parquet写入失败，扁平化字段已在process阶段生成
                 if kind == 'orderbook':
                     # 删除复杂列，保留扁平化字段
-                    df = df.drop(columns=['bids','asks','bids_json','asks_json'], errors='ignore')
-            
-            if df.empty:
-                logger.debug(f"[SAVE] {symbol}-{kind}: 数据为空，跳过保存")
-                return
-            
-            # 计算时间范围（用于文件名）
-            start_ms = int(df['ts_ms'].min())
-            end_ms = int(df['ts_ms'].max())
-            rows = len(df)
-            
-            # 使用 PathBuilder 生成路径（新路径系统）
-            if self.path_builder:
-                # 按日期+小时分组保存
-                df['date'] = pd.to_datetime(df['ts_ms'], unit='ms', utc=True).dt.strftime('%Y-%m-%d')
-                df['hour'] = pd.to_datetime(df['ts_ms'], unit='ms', utc=True).dt.strftime('%H')
+                    time_group = time_group.drop(columns=['bids','asks','bids_json','asks_json'], errors='ignore')
                 
-                for (date_str, hour_str), time_group in df.groupby(['date', 'hour']):
-                    # 计算当前分组的时间范围
-                    group_start_ms = int(time_group['ts_ms'].min())
-                    group_end_ms = int(time_group['ts_ms'].max())
-                    group_rows = len(time_group)
-                    
-                    # 文件大小控制：如果超过最大行数，分批保存
-                    if group_rows > self.max_rows_per_file:
-                        # 分批保存
-                        for i in range(0, group_rows, self.max_rows_per_file):
-                            batch = time_group.iloc[i:i+self.max_rows_per_file]
-                            batch_start_ms = int(batch['ts_ms'].min())
-                            batch_end_ms = int(batch['ts_ms'].max())
-                            batch_rows = len(batch)
-                            
-                            # 生成路径
-                            parquet_path, sidecar_path, tmp_path = self.path_builder.part_paths(
-                                layer, batch_start_ms, batch_end_ms, symbol, kind, batch_rows
-                            )
-                            
-                            # 原子写入：先写.tmp，然后重命名
-                            try:
-                                # 写入临时文件
-                                batch = batch.drop(columns=['date', 'hour'], errors='ignore')
-                                batch.to_parquet(tmp_path, compression='snappy', index=False)
-                                
-                                # 计算SHA1
-                                file_sha1 = self.path_builder.sha1(tmp_path)
-                                
-                                # 生成sidecar文件
-                                sidecar_data = {
-                                    "schema_version": "preagg_meta/v1",
-                                    "layer": layer,
-                                    "kind": kind,
-                                    "symbol": symbol.lower(),
-                                    "date": date_str,
-                                    "hour": hour_str,
-                                    "start_ms": batch_start_ms,
-                                    "end_ms": batch_end_ms,
-                                    "rows": batch_rows,
-                                    "dq": {
-                                        "ok": batch_rows,
-                                        "bad": 0,
-                                        "report": None
-                                    },
-                                    "source_versions": [],
-                                    "file_sha1": file_sha1
-                                }
-                                
-                                # 如果有DQ报告，添加到sidecar
-                                if dq_report['bad_rows'] > 0:
-                                    sidecar_data['dq']['bad'] = dq_report['bad_rows']
-                                    sidecar_data['dq']['ok'] = dq_report['ok_rows']
-                                
-                                # 写入sidecar文件
-                                with open(sidecar_path, 'w', encoding='utf-8') as f:
-                                    json.dump(sidecar_data, f, indent=2, ensure_ascii=False)
-                                
-                                # 原子重命名（Windows需要先删除目标文件）
-                                if parquet_path.exists():
-                                    parquet_path.unlink()
-                                tmp_path.rename(parquet_path)
-                                
-                                logger.info(f"保存数据: {symbol}-{kind} layer={layer} date={date_str} hour={hour_str} rows={batch_rows} → {parquet_path}")
-                                
-                                # 更新每小时写盘行数统计
-                                self.hourly_write_counts[kind] += batch_rows
-                            except Exception as e:
-                                logger.error(f"保存数据失败 {symbol}-{kind}: {e}")
-                                if tmp_path.exists():
-                                    tmp_path.unlink()
-                    else:
-                        # 单文件保存
-                        parquet_path, sidecar_path, tmp_path = self.path_builder.part_paths(
-                            layer, group_start_ms, group_end_ms, symbol, kind, group_rows
-                        )
-                        
-                        # 原子写入：先写.tmp，然后重命名
-                        try:
-                            # 写入临时文件
-                            time_group = time_group.drop(columns=['date', 'hour'], errors='ignore')
-                            time_group.to_parquet(tmp_path, compression='snappy', index=False)
-                            
-                            # 计算SHA1
-                            file_sha1 = self.path_builder.sha1(tmp_path)
-                            
-                            # 生成sidecar文件
-                            sidecar_data = {
-                                "schema_version": "preagg_meta/v1",
-                                "layer": layer,
-                                "kind": kind,
-                                "symbol": symbol.lower(),
-                                "date": date_str,
-                                "hour": hour_str,
-                                "start_ms": group_start_ms,
-                                "end_ms": group_end_ms,
-                                "rows": group_rows,
-                                "dq": {
-                                    "ok": group_rows,
-                                    "bad": 0,
-                                    "report": None
-                                },
-                                "source_versions": [],
-                                "file_sha1": file_sha1
-                            }
-                            
-                            # 如果有DQ报告，添加到sidecar
-                            if dq_report['bad_rows'] > 0:
-                                sidecar_data['dq']['bad'] = dq_report['bad_rows']
-                                sidecar_data['dq']['ok'] = dq_report['ok_rows']
-                            
-                            # 写入sidecar文件
-                            with open(sidecar_path, 'w', encoding='utf-8') as f:
-                                json.dump(sidecar_data, f, indent=2, ensure_ascii=False)
-                            
-                            # 原子重命名
-                            if parquet_path.exists():
-                                parquet_path.unlink()
-                            tmp_path.rename(parquet_path)
-                            
-                            logger.info(f"保存数据: {symbol}-{kind} layer={layer} date={date_str} hour={hour_str} rows={group_rows} → {parquet_path}")
-                            
-                            # 更新每小时写盘行数统计
-                            self.hourly_write_counts[kind] += group_rows
-                        except Exception as e:
-                            logger.error(f"保存数据失败 {symbol}-{kind}: {e}")
-                            if tmp_path.exists():
-                                tmp_path.unlink()
-            else:
-                # 降级：使用旧路径系统
-                df['date'] = pd.to_datetime(df['ts_ms'], unit='ms', utc=True).dt.strftime('%Y-%m-%d')
-                df['hour'] = pd.to_datetime(df['ts_ms'], unit='ms', utc=True).dt.strftime('%H')
-                df['source_tier'] = layer
-                base_dir = getattr(self, 'preview_dir', self.data_root / 'preview') if layer == 'preview' else getattr(self, 'output_dir', self.data_root)
-                
-                for (date_str, hour_str), time_group in df.groupby(['date', 'hour']):
-                    if len(time_group) > self.max_rows_per_file:
-                        for i in range(0, len(time_group), self.max_rows_per_file):
-                            batch = time_group.iloc[i:i+self.max_rows_per_file]
-                            filename = f"part-{time.time_ns()}-{uuid.uuid4().hex[:6]}-batch{i//self.max_rows_per_file}.parquet"
-                            filepath = base_dir / f"date={date_str}" / f"hour={hour_str}" / f"symbol={symbol}" / f"kind={kind}" / filename
-                            filepath.parent.mkdir(parents=True, exist_ok=True)
-                            batch.to_parquet(filepath, compression='snappy', index=False)
-                            logger.info(f"保存数据: {symbol}-{kind} date={date_str} hour={hour_str} rows={len(batch)} → {filepath}")
-                            self.hourly_write_counts[kind] += len(batch)
-                    else:
-                        filename = f"part-{time.time_ns()}-{uuid.uuid4().hex[:6]}.parquet"
-                        filepath = base_dir / f"date={date_str}" / f"hour={hour_str}" / f"symbol={symbol}" / f"kind={kind}" / filename
+                # 文件大小控制：如果超过最大行数，分批保存
+                if len(time_group) > self.max_rows_per_file:
+                    # 分批保存
+                    for i in range(0, len(time_group), self.max_rows_per_file):
+                        batch = time_group.iloc[i:i+self.max_rows_per_file]
+                        filename = f"part-{time.time_ns()}-{uuid.uuid4().hex[:6]}-batch{i//self.max_rows_per_file}.parquet"
+                        filepath = base_dir / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}" / filename
                         filepath.parent.mkdir(parents=True, exist_ok=True)
-                        time_group.to_parquet(filepath, compression='snappy', index=False)
-                        logger.info(f"保存数据: {symbol}-{kind} date={date_str} hour={hour_str} rows={len(time_group)} → {filepath}")
-                        self.hourly_write_counts[kind] += len(time_group)
+                        batch.to_parquet(filepath, compression='snappy', index=False)
+                        logger.info(f"保存数据: {symbol}-{kind} date={date_str} hour={hour_str} rows={len(batch)} → {filepath}")
+                        
+                        # 更新每小时写盘行数统计
+                        self.hourly_write_counts[kind] += len(batch)
+                else:
+                    # 单文件保存
+                    filename = f"part-{time.time_ns()}-{uuid.uuid4().hex[:6]}.parquet"
+                    filepath = base_dir / f"date={date_str}" / f"hour={hour_str}" / f"symbol={sym}" / f"kind={kind}" / filename
+                    filepath.parent.mkdir(parents=True, exist_ok=True)
+                    time_group.to_parquet(filepath, compression='snappy', index=False)
+                    logger.info(f"保存数据: {symbol}-{kind} date={date_str} hour={hour_str} rows={len(time_group)} → {filepath}")
+                    
+                    # 更新每小时写盘行数统计
+                    self.hourly_write_counts[kind] += len(time_group)
             
         except Exception as e:
             logger.error(f"保存数据错误 {symbol}-{kind}: {e.__class__.__name__}: {e}")
@@ -2220,8 +2224,7 @@ class SuccessOFICVDHarvester:
                     
                     # 保存manifest文件（使用固定的artifacts目录）
                     timestamp = datetime.utcnow().strftime("%Y%m%d_%H")
-                    artifacts_dir = getattr(self, 'artifacts_root', getattr(self, 'artifacts_dir', self.base_dir / "artifacts"))
-                    manifest_file = artifacts_dir / "dq_reports" / f"slices_manifest_{timestamp}.json"
+                    manifest_file = self.artifacts_dir / "dq_reports" / f"slices_manifest_{timestamp}.json"
                     manifest_file.parent.mkdir(parents=True, exist_ok=True)
                     
                     with open(manifest_file, 'w', encoding='utf-8') as f:
@@ -2565,16 +2568,14 @@ async def main():
         
         symbols = os.getenv('SYMBOLS', 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT').split(',')
         run_hours = float(os.getenv('RUN_HOURS', '87600'))
-        script_dir = Path(__file__).parent.absolute()
-        default_output_dir = script_dir / "data" / "ofi_cvd"
-        output_dir = os.getenv('OUTPUT_DIR', str(default_output_dir))
         
         harvester = SuccessOFICVDHarvester(
             cfg=None,
             compat_env=True,  # 关键：显式允许 env 回退
             symbols=symbols,
             run_hours=run_hours,
-            output_dir=output_dir
+            # 不传 output_dir，让 _apply_cfg(env) 走 deploy_root 默认值
+            output_dir=None
         )
     
     # 运行采集
