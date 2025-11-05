@@ -40,7 +40,7 @@ repo/
 │     │  ├─ cvd/real_cvd_calculator.py
 │     │  ├─ fusion/ofi_cvd_fusion.py
 │     │  └─ divergence/ofi_cvd_divergence.py
-│     ├─ risk/strategy_mode.py            # StrategyModeManager
+│     ├─ risk/strategy_mode_manager.py    # StrategyModeManager
 │     ├─ ingestion/                       # ★ 新增：采集层库（HARVEST 可复用实现）
 │     │  └─ harvester.py                  # WS接入→统一Row→分片→DQ
 │     └─ signals/                         # ★ 新增：信号层库（CORE_ALGO 实现）
@@ -228,6 +228,8 @@ risk:
 pip install -e .
 
 # 2) 启动 HARVEST（本地）
+bash scripts/harvest_local.sh
+# 或
 python -m mcp.harvest_server.app \
   --config ./config/defaults.yaml \
   --output ./data \
@@ -256,21 +258,10 @@ python -m orchestrator.run \
 ---
 
 ## 6) 任务卡（与 `TASK_INDEX.md` 对齐）
-
-### V4.1 新增任务（核心）
-- **TASK-03** - Harvest：WS统一RowDQ落地（jsonl parquet） · M1 · harvest
-- **TASK-04** - Signal：CORE_ALGO 服务化（Sink jsonl sqlite） · M1 · signal
-- **TASK-05** - Docs：补齐 HARVEST CORE_ALGO 契约示例 · M1 · docs
-- **TASK-06** - Orchestrator：编排与烟囱测试（M1→M3） · M1 · orchestrator
-
-### 完整任务列表
-详见 `/TASK_INDEX.md` 和 `/tasks/` 目录下的完整任务列表（共 22 个任务，TASK-01 至 TASK-22）
-
-**任务编号顺序**：
-- TASK-01~02：Data MCP 基础
-- TASK-03~06：V4.1 新增核心模块（HARVEST/CORE_ALGO）
-- TASK-07~14：原有核心功能（历史回放、特征计算、风控、Broker）
-- TASK-15~22：增强功能（Broker后端、PnL、报告、控制面、测试、CI）
+- `TASK-03 - Harvest：WS 采集 → 统一 Row Schema → 出站 DQ Gate（落地 jsonl/parquet）`
+- `TASK-04 - Signal：CORE_ALGO 服务化（Sink: jsonl/sqlite + 健康度指标）`
+- `TASK-05 - Docs：/docs/api_contracts.md 扩充 HARVEST/CORE_ALGO 契约 & 样例`
+- `TASK-06 - Orchestrator：编排与烟囱测试（M1→M3）`
 
 ---
 
