@@ -1,5 +1,5 @@
 # Feature MCP：compute_features 接线（OFI/CVD/FUSION/DIVERGENCE）
-**任务编号**: TASK-06  
+**任务编号**: TASK-10  
 **批次**: M1  
 **优先级**: P0  
 **所属模块**: feature
@@ -11,7 +11,7 @@
 输出 `{z_ofi,z_cvd,fusion,divergence,fp}`；CVD 可在缺成交时退化。
 
 ## 前置依赖
-- TASK-05
+- TASK-09
 
 ## 输出物
 - 连续调用稳定；fusion.consistency ∈[0,1]

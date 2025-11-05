@@ -257,14 +257,20 @@ python -m orchestrator.run \
 
 ## 6) 任务卡（与 `TASK_INDEX.md` 对齐）
 
-### V4.1 新增任务
+### V4.1 新增任务（核心）
 - **TASK-03** - Harvest：WS统一RowDQ落地（jsonl parquet） · M1 · harvest
 - **TASK-04** - Signal：CORE_ALGO 服务化（Sink jsonl sqlite） · M1 · signal
 - **TASK-05** - Docs：补齐 HARVEST CORE_ALGO 契约示例 · M1 · docs
 - **TASK-06** - Orchestrator：编排与烟囱测试（M1→M3） · M1 · orchestrator
 
-### 原有任务（V4）
-详见 `/TASK_INDEX.md` 和 `/tasks/` 目录下的完整任务列表（共 18 个任务）
+### 完整任务列表
+详见 `/TASK_INDEX.md` 和 `/tasks/` 目录下的完整任务列表（共 22 个任务，TASK-01 至 TASK-22）
+
+**任务编号顺序**：
+- TASK-01~02：Data MCP 基础
+- TASK-03~06：V4.1 新增核心模块（HARVEST/CORE_ALGO）
+- TASK-07~14：原有核心功能（历史回放、特征计算、风控、Broker）
+- TASK-15~22：增强功能（Broker后端、PnL、报告、控制面、测试、CI）
 
 ---
 

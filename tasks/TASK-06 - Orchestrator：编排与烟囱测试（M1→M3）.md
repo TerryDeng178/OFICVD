@@ -15,8 +15,8 @@
 ## 前置依赖
 - TASK-03（HARVEST）
 - TASK-04（CORE_ALGO）
-- TASK-08（Risk）
-- TASK-10（Broker）
+- TASK-12（Risk）
+- TASK-14（Broker）
 
 ## 输出物
 - 完整的编排流程

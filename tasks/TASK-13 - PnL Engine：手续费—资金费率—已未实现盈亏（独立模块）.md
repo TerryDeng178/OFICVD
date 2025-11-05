@@ -1,5 +1,5 @@
 # PnL Engine：手续费/资金费率/已未实现盈亏（独立模块）
-**任务编号**: TASK-13  
+**任务编号**: TASK-17  
 **批次**: M2  
 **优先级**: P1  
 **所属模块**: pnl
@@ -11,7 +11,7 @@
 单独模块从 fills/positions 计算 `pnl_ledger.jsonl`；可重算。
 
 ## 前置依赖
-- TASK-12
+- TASK-16
 
 ## 输出物
 - `logs/pnl_ledger.jsonl` 周期更新

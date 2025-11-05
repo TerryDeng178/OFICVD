@@ -1,5 +1,5 @@
 # alpha_core：打包成熟组件（OFI/CVD/FUSION/DIVERGENCE/STRATEGYMODE）
-**任务编号**: TASK-04  
+**任务编号**: TASK-08  
 **批次**: M1  
 **优先级**: P0  
 **所属模块**: pkg

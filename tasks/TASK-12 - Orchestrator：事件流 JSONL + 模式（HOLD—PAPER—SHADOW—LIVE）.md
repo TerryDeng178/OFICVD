@@ -1,5 +1,5 @@
 # Orchestrator：事件流 JSONL + 模式（HOLD/PAPER/SHADOW/LIVE）
-**任务编号**: TASK-12  
+**任务编号**: TASK-16  
 **批次**: M1  
 **优先级**: P0  
 **所属模块**: orchestrator
@@ -11,7 +11,7 @@
 写入 `ticks/decisions/orders/fills/pnl`；实现 SHADOW 不下发订单。
 
 ## 前置依赖
-- TASK-01..10
+- TASK-01..14
 
 ## 输出物
 - 运行 10 分钟生成全套事件流

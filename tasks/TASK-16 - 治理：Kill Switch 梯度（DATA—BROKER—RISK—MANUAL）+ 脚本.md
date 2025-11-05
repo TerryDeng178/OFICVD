@@ -1,5 +1,5 @@
 # 治理：Kill Switch 梯度（DATA/BROKER/RISK/MANUAL）+ 脚本
-**任务编号**: TASK-16  
+**任务编号**: TASK-20  
 **批次**: M1  
 **优先级**: P0  
 **所属模块**: ops
@@ -11,7 +11,7 @@
 支持多原因 HOLD；提供脚本与 README。
 
 ## 前置依赖
-- TASK-08, TASK-12
+- TASK-12, TASK-16
 
 ## 输出物
 - `set_trading_mode(HOLD)` 等 API

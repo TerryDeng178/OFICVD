@@ -1,5 +1,5 @@
 # Risk MCP：波动率目标仓位 + 日内损失墙（迟滞）
-**任务编号**: TASK-09  
+**任务编号**: TASK-13  
 **批次**: M1  
 **优先级**: P0  
 **所属模块**: risk
@@ -11,7 +11,7 @@
 在 `propose_order` 里加入 `w=min(cap,k/vol)` 与 `daily_loss_limit_pct`；超限进入 HOLD_RISK，带迟滞恢复。
 
 ## 前置依赖
-- TASK-08
+- TASK-12
 
 ## 输出物
 - 允许/拒绝、建议 qty/lev、risk_state

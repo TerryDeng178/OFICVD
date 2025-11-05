@@ -1,5 +1,5 @@
 # CI：Mermaid/JSON 契约校验 + Smoke 起停
-**任务编号**: TASK-18  
+**任务编号**: TASK-22  
 **批次**: M2  
 **优先级**: P1  
 **所属模块**: ci
@@ -11,7 +11,7 @@
 GitHub Actions：ruff/flake8、JSON 契约校验、服务起停 smoke。
 
 ## 前置依赖
-- TASK-01..17
+- TASK-01..21
 
 ## 输出物
 - `.github/workflows/ci.yml` 通过

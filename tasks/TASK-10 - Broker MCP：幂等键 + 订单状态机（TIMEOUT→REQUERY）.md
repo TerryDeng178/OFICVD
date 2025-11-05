@@ -1,5 +1,5 @@
 # Broker MCP：幂等键 + 订单状态机（TIMEOUT→REQUERY）
-**任务编号**: TASK-10  
+**任务编号**: TASK-14  
 **批次**: M1  
 **优先级**: P0  
 **所属模块**: broker

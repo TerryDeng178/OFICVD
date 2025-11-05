@@ -1,5 +1,5 @@
 # Feature MCP：defaults.yaml → 组件构造器映射（V4）
-**任务编号**: TASK-05  
+**任务编号**: TASK-09  
 **批次**: M1  
 **优先级**: P0  
 **所属模块**: feature
@@ -11,7 +11,7 @@
 从 `config/defaults.yaml` 加载 OFI/CVD/Fusion/Divergence 配置，实例化单例；生成 cfg 指纹。
 
 ## 前置依赖
-- TASK-04
+- TASK-08
 
 ## 输出物
 - 服务启动打印关键配置

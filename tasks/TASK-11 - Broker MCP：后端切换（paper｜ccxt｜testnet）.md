@@ -1,5 +1,5 @@
 # Broker MCP：后端切换（paper｜ccxt｜testnet）
-**任务编号**: TASK-11  
+**任务编号**: TASK-15  
 **批次**: M2  
 **优先级**: P1  
 **所属模块**: broker
@@ -11,7 +11,7 @@
 抽象 `IBroker`；提供 PaperBackend 与 CCXTBackend（testnet）。
 
 ## 前置依赖
-- TASK-10
+- TASK-14
 
 ## 输出物
 - 切换后端无需改上游

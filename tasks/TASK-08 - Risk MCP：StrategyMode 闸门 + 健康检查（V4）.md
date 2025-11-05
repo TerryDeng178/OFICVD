@@ -1,5 +1,5 @@
 # Risk MCP：StrategyMode 闸门 + 健康检查（V4）
-**任务编号**: TASK-08  
+**任务编号**: TASK-12  
 **批次**: M1  
 **优先级**: P0  
 **所属模块**: risk
@@ -11,7 +11,7 @@
 `/propose_order` 在不允许时段/低活跃/数据异常时直接 HOLD；提供 `/check_system_health`。
 
 ## 前置依赖
-- TASK-01, TASK-06
+- TASK-01, TASK-10
 
 ## 输出物
 - 可读的健康指标，HOLD 原因明确

@@ -14,8 +14,8 @@
 - 提供健康度指标
 
 ## 前置依赖
-- TASK-04（alpha_core 打包）
-- TASK-06（compute_features 接线）
+- TASK-08（alpha_core 打包）
+- TASK-10（compute_features 接线）
 
 ## 输出物
 - `src/alpha_core/signals/core_algo.py`（已移动，需完善导入）

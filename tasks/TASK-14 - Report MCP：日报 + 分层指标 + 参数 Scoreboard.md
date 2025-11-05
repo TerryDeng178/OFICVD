@@ -1,5 +1,5 @@
 # Report MCP：日报 + 分层指标 + 参数 Scoreboard
-**任务编号**: TASK-14  
+**任务编号**: TASK-18  
 **批次**: M2  
 **优先级**: P1  
 **所属模块**: report
@@ -11,7 +11,7 @@
 输出 Markdown：胜率、盈亏比、EV/Trade、MDD、Sharpe、Turnover、成本占比、分时/Regime/一致性分层；参数榜按 cfg 指纹聚合。
 
 ## 前置依赖
-- TASK-12, TASK-13
+- TASK-16, TASK-17
 
 ## 输出物
 - `/daily_report?date=YYYY-MM-DD` 输出 Markdown

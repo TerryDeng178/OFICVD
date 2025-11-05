@@ -1,5 +1,5 @@
 # 控制面：set_config(new, activate_at) + 变更事件
-**任务编号**: TASK-15  
+**任务编号**: TASK-19  
 **批次**: M2  
 **优先级**: P1  
 **所属模块**: orchestrator
@@ -11,7 +11,7 @@
 提供配置变更 API；记录变更事件（旧/新/指纹/操作者/时间）。
 
 ## 前置依赖
-- TASK-12
+- TASK-16
 
 ## 输出物
 - `POST /set_config` 可用
