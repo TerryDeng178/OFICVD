@@ -1,0 +1,147 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Orderbook Schema",
+  "description": "订单簿数据统一Row Schema",
+  "type": "object",
+  "required": ["ts_ms", "recv_ts_ms", "symbol", "row_id", "best_bid", "best_ask", "mid"],
+  "properties": {
+    "ts_ms": {
+      "type": "integer",
+      "description": "事件时间戳（毫秒）"
+    },
+    "recv_ts_ms": {
+      "type": "integer",
+      "description": "接收时间戳（毫秒）"
+    },
+    "symbol": {
+      "type": "string",
+      "description": "交易对符号"
+    },
+    "row_id": {
+      "type": "string",
+      "description": "行唯一标识符"
+    },
+    "best_bid": {
+      "type": "number",
+      "description": "最佳买价",
+      "minimum": 0
+    },
+    "best_ask": {
+      "type": "number",
+      "description": "最佳卖价",
+      "minimum": 0
+    },
+    "mid": {
+      "type": "number",
+      "description": "中间价",
+      "minimum": 0
+    },
+    "spread_bps": {
+      "type": "number",
+      "description": "价差（基点）"
+    },
+    "latency_ms": {
+      "type": "number",
+      "description": "延迟（毫秒）",
+      "minimum": 0
+    },
+    "levels": {
+      "type": "integer",
+      "description": "有效价差范围内的匹配深度"
+    },
+    "first_id": {
+      "type": "integer",
+      "description": "首ID"
+    },
+    "last_id": {
+      "type": "integer",
+      "description": "末ID"
+    },
+    "prev_last_id": {
+      "type": "integer",
+      "description": "前一个末ID"
+    },
+    "d_bid_qty_agg": {
+      "type": "number",
+      "description": "买方数量变化聚合"
+    },
+    "d_ask_qty_agg": {
+      "type": "number",
+      "description": "卖方数量变化聚合"
+    },
+    "d_b0": {"type": "number", "description": "买方1档数量变化"},
+    "d_b1": {"type": "number", "description": "买方2档数量变化"},
+    "d_b2": {"type": "number", "description": "买方3档数量变化"},
+    "d_b3": {"type": "number", "description": "买方4档数量变化"},
+    "d_b4": {"type": "number", "description": "买方5档数量变化"},
+    "d_a0": {"type": "number", "description": "卖方1档数量变化"},
+    "d_a1": {"type": "number", "description": "卖方2档数量变化"},
+    "d_a2": {"type": "number", "description": "卖方3档数量变化"},
+    "d_a3": {"type": "number", "description": "卖方4档数量变化"},
+    "d_a4": {"type": "number", "description": "卖方5档数量变化"},
+    "bid1_p": {"type": "number", "description": "买方1档价格"},
+    "bid1_q": {"type": "number", "description": "买方1档数量"},
+    "bid2_p": {"type": "number", "description": "买方2档价格"},
+    "bid2_q": {"type": "number", "description": "买方2档数量"},
+    "bid3_p": {"type": "number", "description": "买方3档价格"},
+    "bid3_q": {"type": "number", "description": "买方3档数量"},
+    "bid4_p": {"type": "number", "description": "买方4档价格"},
+    "bid4_q": {"type": "number", "description": "买方4档数量"},
+    "bid5_p": {"type": "number", "description": "买方5档价格"},
+    "bid5_q": {"type": "number", "description": "买方5档数量"},
+    "ask1_p": {"type": "number", "description": "卖方1档价格"},
+    "ask1_q": {"type": "number", "description": "卖方1档数量"},
+    "ask2_p": {"type": "number", "description": "卖方2档价格"},
+    "ask2_q": {"type": "number", "description": "卖方2档数量"},
+    "ask3_p": {"type": "number", "description": "卖方3档价格"},
+    "ask3_q": {"type": "number", "description": "卖方3档数量"},
+    "ask4_p": {"type": "number", "description": "卖方4档价格"},
+    "ask4_q": {"type": "number", "description": "卖方4档数量"},
+    "ask5_p": {"type": "number", "description": "卖方5档价格"},
+    "ask5_q": {"type": "number", "description": "卖方5档数量"},
+    "reconnect_count": {
+      "type": "integer",
+      "description": "重连计数"
+    },
+    "queue_dropped": {
+      "type": "integer",
+      "description": "队列丢弃计数"
+    },
+    "bids": {
+      "type": "array",
+      "description": "原始买方档位（仅在RAW库）"
+    },
+    "asks": {
+      "type": "array",
+      "description": "原始卖方档位（仅在RAW库）"
+    },
+    "bids_json": {
+      "type": "string",
+      "description": "买方档位JSON（仅在RAW库）"
+    },
+    "asks_json": {
+      "type": "string",
+      "description": "卖方档位JSON（仅在RAW库）"
+    },
+    "date": {
+      "type": "string",
+      "description": "日期分区（YYYY-MM-DD）"
+    },
+    "hour": {
+      "type": "string",
+      "description": "小时分区（HH）"
+    },
+    "source_tier": {
+      "type": "string",
+      "description": "数据源层级",
+      "enum": ["raw", "preview"]
+    },
+    "schema_version": {
+      "type": "string",
+      "description": "Schema版本",
+      "enum": ["preagg_meta/v1"]
+    }
+  },
+  "schema_version": "preagg_meta/v1"
+}
+

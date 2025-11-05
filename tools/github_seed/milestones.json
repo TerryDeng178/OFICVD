@@ -1,0 +1,6 @@
+[
+  {"title":"M1 数据与特征","state":"open","description":"完成采集与特征接线"},
+  {"title":"M2 信号与执行","state":"open","description":"CoreAlgo+风控+编排冒烟"},
+  {"title":"M3 回测与复盘","state":"open","description":"回放、PnL 与复盘报表"}
+]
+

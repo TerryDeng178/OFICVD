@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Features Schema",
+  "description": "特征对齐宽表统一Row Schema",
+  "type": "object",
+  "required": ["second_ts", "symbol", "mid"],
+  "properties": {
+    "second_ts": {
+      "type": "integer",
+      "description": "秒级时间戳"
+    },
+    "symbol": {
+      "type": "string",
+      "description": "交易对符号"
+    },
+    "mid": {
+      "type": "number",
+      "description": "中间价",
+      "minimum": 0
+    },
+    "ts_ms": {
+      "type": "integer",
+      "description": "毫秒时间戳"
+    },
+    "recv_ts_ms": {
+      "type": "integer",
+      "description": "接收时间戳（毫秒）"
+    },
+    "row_id": {
+      "type": "string",
+      "description": "行唯一标识符"
+    },
+    "return_1s": {
+      "type": "number",
+      "description": "1秒收益率"
+    },
+    "ofi_z": {
+      "type": "number",
+      "description": "OFI Z-score"
+    },
+    "cvd_z": {
+      "type": "number",
+      "description": "CVD Z-score"
+    },
+    "fusion_score": {
+      "type": "number",
+      "description": "融合分数"
+    },
+    "scenario_2x2": {
+      "type": "string",
+      "description": "2x2场景标签",
+      "enum": ["A_H", "A_L", "Q_H", "Q_L"]
+    },
+    "lag_ms_ofi": {
+      "type": "number",
+      "description": "OFI延迟（毫秒）"
+    },
+    "lag_ms_cvd": {
+      "type": "number",
+      "description": "CVD延迟（毫秒）"
+    },
+    "lag_ms_fusion": {
+      "type": "number",
+      "description": "融合延迟（毫秒）"
+    },
+    "best_bid": {
+      "type": "number",
+      "description": "最佳买价"
+    },
+    "best_ask": {
+      "type": "number",
+      "description": "最佳卖价"
+    },
+    "spread_bps": {
+      "type": "number",
+      "description": "价差（基点）"
+    },
+    "best_buy_fill": {
+      "type": "number",
+      "description": "买入可得价"
+    },
+    "best_sell_fill": {
+      "type": "number",
+      "description": "卖出可得价"
+    },
+    "date": {
+      "type": "string",
+      "description": "日期分区（YYYY-MM-DD）"
+    },
+    "hour": {
+      "type": "string",
+      "description": "小时分区（HH）"
+    },
+    "source_tier": {
+      "type": "string",
+      "description": "数据源层级",
+      "enum": ["raw", "preview"]
+    },
+    "schema_version": {
+      "type": "string",
+      "description": "Schema版本",
+      "enum": ["preagg_meta/v1"]
+    }
+  },
+  "schema_version": "preagg_meta/v1"
+}
+

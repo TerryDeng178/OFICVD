@@ -1,0 +1,63 @@
+[
+  {
+    "title":"Epic-01 数据契约（Row Schema + DQ Gate）",
+    "milestone":"M1 数据与特征",
+    "labels":["type:epic","stage:M1","area:harvest"],
+    "body":"**目标**：统一 Row Schema，出站 DQ（stale/缺字段/异常量），样例与契约文档同步（/docs/api_contracts.md 3.1）。\\n**成果物**：harvester.normalize_row / dq_gate；样例；文档。\\n**验收**：DQ 丢弃率<5%；Parquet 可读；Schema 与文档一致。\\n**更新时间**：2025-11-05 (Asia/Tokyo)"
+  },
+  {
+    "title":"Epic-02 采集接入（WS/重连/分片）",
+    "milestone":"M1 数据与特征",
+    "labels":["type:epic","stage:M1","area:harvest"],
+    "body":"**目标**：接入 fstream aggTrade/bookTicker/depth@100ms，指数回退重连与心跳 watchdog；分片轮转（max_rows/max_sec）。\\n**成果物**：run_ws_harvest；健康日志。\\n**验收**：1h 无崩溃；订阅成功率>99%；分片路径规范。\\n**更新时间**：2025-11-05 (Asia/Tokyo)"
+  },
+  {
+    "title":"Epic-03 采集服务化（Harvest MCP + 脚本）",
+    "milestone":"M1 数据与特征",
+    "labels":["type:epic","stage:M1","area:harvest"],
+    "body":"**目标**：mcp/harvest_server/app.py 薄壳 + scripts/harvest_local.sh；CLI 参数齐全。\\n**验收**：可一键启动；优雅退出；启动日志包含配置摘要。\\n**更新时间**：2025-11-05 (Asia/Tokyo)"
+  },
+  {
+    "title":"Epic-04 特征接线（OFI/CVD/FUSION/DIVERGENCE）",
+    "milestone":"M1 数据与特征",
+    "labels":["type:epic","stage:M1","area:features"],
+    "body":"**目标**：统一批处理 Loader → 计算器适配；固定输出字段（z_ofi / z_cvd / fusion_score / div_type）。\\n**验收**：UT 覆盖 3 种边界；1k rps 下 CPU < 1 核（本地）。\\n**更新时间**：2025-11-05 (Asia/Tokyo)"
+  },
+  {
+    "title":"Epic-05 信号服务（CORE_ALGO + Sink）",
+    "milestone":"M2 信号与执行",
+    "labels":["type:epic","stage:M2","area:signals"],
+    "body":"**目标**：CoreAlgo.process → JSONL/SQLite Sink；schema 固定；debug/replay 开关。\\n**验收**：2h 无漏写；SQLite WAL 并发读通过。\\n**更新时间**：2025-11-05 (Asia/Tokyo)"
+  },
+  {
+    "title":"Epic-06 风控护栏（StrategyMode + spread/lag/activity）",
+    "milestone":"M2 信号与执行",
+    "labels":["type:epic","stage:M2","area:risk"],
+    "body":"**目标**：市场状态切换；三类护栏与原因标记。\\n**验收**：阈值触发即屏蔽并记录；低活跃仅观测。\\n**更新时间**：2025-11-05 (Asia/Tokyo)"
+  },
+  {
+    "title":"Epic-07 编排与执行（Orchestrator + Broker Stub）",
+    "milestone":"M2 信号与执行",
+    "labels":["type:epic","stage:M2","area:orchestrator"],
+    "body":"**目标**：harvest→features→signal→broker→report 串接；30 分钟冒烟。\\n**验收**：无内存泄漏；生成 signals 与 mock orders。\\n**更新时间**：2025-11-05 (Asia/Tokyo)"
+  },
+  {
+    "title":"Epic-08 回放回测（Replay + Match/Fees/Slippage）",
+    "milestone":"M3 回测与复盘",
+    "labels":["type:epic","stage:M3","area:backtest"],
+    "body":"**目标**：回放历史分片，撮合 + 费用/滑点模型，输出 PnL。\\n**验收**：24h 样本可计算；费用模型参数化（maker/taker,bps）。\\n**更新时间**：2025-11-05 (Asia/Tokyo)"
+  },
+  {
+    "title":"Epic-09 复盘报表（指标聚合 + 日报/周报）",
+    "milestone":"M3 回测与复盘",
+    "labels":["type:epic","stage:M3","area:backtest"],
+    "body":"**目标**：胜率/盈亏比/频次/回撤/费用等指标聚合；生成 MD/CSV/PNG。\\n**验收**：字段齐全且可追溯。\\n**更新时间**：2025-11-05 (Asia/Tokyo)"
+  },
+  {
+    "title":"Epic-10 文档与校验（/docs 同步 + 链接检查）",
+    "milestone":"M3 回测与复盘",
+    "labels":["type:epic","stage:M3","area:docs"],
+    "body":"**目标**：architecture_flow / api_contracts / order_state_machine 最终版；链接校验与 pre-commit。\\n**验收**：README 与 /docs 链接 100% 可达；契约与样例一致。\\n**更新时间**：2025-11-05 (Asia/Tokyo)"
+  }
+]
+

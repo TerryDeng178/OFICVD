@@ -1,19 +1,29 @@
 # -*- coding: utf-8 -*-
 # OFI+CVD 交易系统 - 默认配置文件
-# 
-# 组件参数对齐：OFI/CVD/FUSION/DIVERGENCE/STRATEGYMODE
+# HARVEST 数据目录规范（统一版）
 
-# TODO: 添加完整的默认配置
-# - OFI 配置
-# - CVD 配置
-# - FUSION 配置
-# - DIVERGENCE 配置
-# - STRATEGYMODE 配置
+paths:
+  data_root: "${OFICVD_DATA_ROOT:./deploy/data/ofi_cvd}"
+  artifacts_root: "${OFICVD_ARTIFACTS_ROOT:./deploy/artifacts/ofi_cvd}"
+  timezone: "UTC"    # 分区的基准时区（强烈建议 UTC）
+  layer: "raw"       # harvester 默认只写 raw；preview 由派生/接线任务产出
+
+harvest:
+  rotate:
+    max_rows: 500000
+    max_sec: 300
+  kinds:
+    raw: ["prices", "orderbook", "aggtrade", "depth"]
+    preview: ["ofi", "cvd", "fusion", "divergence", "events", "features"]
+  dq:
+    stale_ms: 1500
+    require_fields: ["ts_ms", "symbol", "row_id"]
+    min_price: 0.0
+    min_qty: 0.0
 
 system:
   version: "v4.0.0"
   environment: "development"
-  timezone: "Asia/Tokyo"
 
 components:
   ofi:
@@ -35,4 +45,3 @@ components:
   strategy:
     # TODO: 添加 STRATEGYMODE 配置参数
     pass
-

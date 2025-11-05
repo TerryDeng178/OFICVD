@@ -1,0 +1,15 @@
+[
+  {"name":"type:epic","color":"5319e7","description":"Epic（史诗）"},
+  {"name":"type:story","color":"0e8a16","description":"Story（具体任务）"},
+  {"name":"stage:M1","color":"1d76db","description":"数据与特征"},
+  {"name":"stage:M2","color":"fbca04","description":"信号与执行"},
+  {"name":"stage:M3","color":"b60205","description":"回测与复盘"},
+  {"name":"area:harvest","color":"0052cc","description":"采集层"},
+  {"name":"area:features","color":"0366d6","description":"特征层"},
+  {"name":"area:signals","color":"0b7500","description":"信号层"},
+  {"name":"area:risk","color":"d93f0b","description":"风控"},
+  {"name":"area:orchestrator","color":"5319e7","description":"编排"},
+  {"name":"area:backtest","color":"6f42c1","description":"回放/回测"},
+  {"name":"area:docs","color":"c2e0c6","description":"文档"}
+]
+

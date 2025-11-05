@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Prices Schema",
+  "description": "价格数据统一Row Schema",
+  "type": "object",
+  "required": ["ts_ms", "recv_ts_ms", "symbol", "row_id", "price"],
+  "properties": {
+    "ts_ms": {
+      "type": "integer",
+      "description": "事件时间戳（毫秒）"
+    },
+    "recv_ts_ms": {
+      "type": "integer",
+      "description": "接收时间戳（毫秒）"
+    },
+    "symbol": {
+      "type": "string",
+      "description": "交易对符号，如BTCUSDT"
+    },
+    "row_id": {
+      "type": "string",
+      "description": "行唯一标识符"
+    },
+    "price": {
+      "type": "number",
+      "description": "成交价格",
+      "minimum": 0,
+      "exclusiveMinimum": true
+    },
+    "qty": {
+      "type": "number",
+      "description": "成交数量",
+      "minimum": 0
+    },
+    "is_buyer_maker": {
+      "type": "boolean",
+      "description": "是否为买方挂单"
+    },
+    "agg_trade_id": {
+      "type": "integer",
+      "description": "聚合交易ID"
+    },
+    "latency_ms": {
+      "type": "number",
+      "description": "延迟（毫秒）",
+      "minimum": 0
+    },
+    "recv_rate_tps": {
+      "type": "number",
+      "description": "接收速率（TPS）"
+    },
+    "best_buy_fill": {
+      "type": "number",
+      "description": "买入可得价"
+    },
+    "best_sell_fill": {
+      "type": "number",
+      "description": "卖出可得价"
+    },
+    "reconnect_count": {
+      "type": "integer",
+      "description": "重连计数"
+    },
+    "queue_dropped": {
+      "type": "integer",
+      "description": "队列丢弃计数"
+    },
+    "session": {
+      "type": "string",
+      "description": "交易时段",
+      "enum": ["Tokyo", "London", "NewYork", "Sydney", "Unknown"]
+    },
+    "regime": {
+      "type": "string",
+      "description": "市场状态",
+      "enum": ["active", "quiet"]
+    },
+    "vol_bucket": {
+      "type": "string",
+      "description": "波动率分桶",
+      "enum": ["low", "mid", "high"]
+    },
+    "scenario_2x2": {
+      "type": "string",
+      "description": "2x2场景标签",
+      "enum": ["A_H", "A_L", "Q_H", "Q_L"]
+    },
+    "fee_tier": {
+      "type": "string",
+      "description": "手续费档位",
+      "enum": ["TM", "MM"]
+    },
+    "date": {
+      "type": "string",
+      "description": "日期分区（YYYY-MM-DD）"
+    },
+    "hour": {
+      "type": "string",
+      "description": "小时分区（HH）"
+    },
+    "source_tier": {
+      "type": "string",
+      "description": "数据源层级",
+      "enum": ["raw", "preview"]
+    },
+    "schema_version": {
+      "type": "string",
+      "description": "Schema版本",
+      "enum": ["preagg_meta/v1"]
+    }
+  },
+  "schema_version": "preagg_meta/v1"
+}
+

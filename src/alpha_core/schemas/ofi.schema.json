@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OFI Schema",
+  "description": "OFI（订单流不平衡）数据统一Row Schema",
+  "type": "object",
+  "required": ["ts_ms", "recv_ts_ms", "symbol", "row_id", "ofi_z"],
+  "properties": {
+    "ts_ms": {
+      "type": "integer",
+      "description": "事件时间戳（毫秒）"
+    },
+    "recv_ts_ms": {
+      "type": "integer",
+      "description": "接收时间戳（毫秒）"
+    },
+    "symbol": {
+      "type": "string",
+      "description": "交易对符号"
+    },
+    "row_id": {
+      "type": "string",
+      "description": "行唯一标识符"
+    },
+    "ofi_z": {
+      "type": "number",
+      "description": "OFI Z-score"
+    },
+    "ofi_value": {
+      "type": "number",
+      "description": "OFI原始值"
+    },
+    "scale": {
+      "type": "number",
+      "description": "缩放因子"
+    },
+    "regime": {
+      "type": "string",
+      "description": "市场状态",
+      "enum": ["active", "quiet"]
+    },
+    "lag_ms_to_trade": {
+      "type": "number",
+      "description": "到交易的延迟（毫秒）"
+    },
+    "alignment": {
+      "type": "string",
+      "description": "对齐来源",
+      "enum": ["strict", "fallback", "none"]
+    },
+    "date": {
+      "type": "string",
+      "description": "日期分区（YYYY-MM-DD）"
+    },
+    "hour": {
+      "type": "string",
+      "description": "小时分区（HH）"
+    },
+    "source_tier": {
+      "type": "string",
+      "description": "数据源层级",
+      "enum": ["raw", "preview"]
+    },
+    "schema_version": {
+      "type": "string",
+      "description": "Schema版本",
+      "enum": ["preagg_meta/v1"]
+    }
+  },
+  "schema_version": "preagg_meta/v1"
+}
+
