@@ -57,7 +57,7 @@ sink:
 signal:
   dedupe_ms: 250
   weak_signal_threshold: 0.08            # 默认 0.2，进一步放宽以便产出少量 confirm
-  consistency_min: 0.05                  # 默认 0.15，进一步降低以便拿到首批 confirm
+  consistency_min: 0.08                  # 默认 0.15，适度放宽以便拿到首批 confirm（从 0.05 微调到 0.08）
   spread_bps_cap: 20.0
   lag_cap_sec: 3.0
   weights:
@@ -98,7 +98,7 @@ strategy_mode:
     combine_logic: OR                     # OR 逻辑：schedule OR market
     schedule:
       enabled: true                      # 启用 schedule（空窗口=全天有效）
-      timezone: "UTC"
+      timezone: "Asia/Tokyo"             # 使用 Asia/Tokyo 时区（与当前环境一致）
       enabled_weekdays: []
       active_windows: []                 # 空数组=全天有效（配合热修#1）
       wrap_midnight: true

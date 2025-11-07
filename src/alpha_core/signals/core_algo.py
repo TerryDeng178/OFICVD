@@ -47,14 +47,19 @@ DEFAULT_SIGNAL_CONFIG: Dict[str, Any] = {
     "dedupe_ms": 250,
     "weak_signal_threshold": 0.2,
     "consistency_min": 0.15,
+    # 分模式/分场景的一致性阈值（优先级高于 consistency_min）
+    "consistency_min_per_regime": {
+        "active": 0.10,
+        "quiet": 0.15
+    },
     "spread_bps_cap": 20.0,
     "lag_cap_sec": 3.0,
     "weights": {"w_ofi": 0.6, "w_cvd": 0.4},
     "activity": {"active_min_tps": 3.0, "normal_min_tps": 1.0},
-    # P0: consistency 保守底座配置
+    # P0: consistency 保守底座配置（略微抬高）
     "consistency_floor": 0.10,
-    "consistency_floor_when_abs_score_ge": 0.40,
-    "consistency_floor_on_divergence": 0.12,
+    "consistency_floor_when_abs_score_ge": 0.45,  # 从 0.40 提升到 0.45
+    "consistency_floor_on_divergence": 0.15,  # 从 0.12 提升到 0.15
     "thresholds": {
         "base": {"buy": 0.6, "strong_buy": 1.2, "sell": -0.6, "strong_sell": -1.2},
         "active": {"buy": 0.5, "strong_buy": 1.0, "sell": -0.5, "strong_sell": -1.0},
@@ -315,6 +320,13 @@ class CoreAlgorithm:
 
         regime = self._infer_regime(row)
         thresholds = self._thresholds_for_regime(regime)
+        
+        # 分模式/分场景的一致性阈值（优先级高于全局 consistency_min）
+        consistency_min_per_regime = self.config.get("consistency_min_per_regime", {})
+        if consistency_min_per_regime and regime in consistency_min_per_regime:
+            effective_consistency_min = consistency_min_per_regime[regime]
+        else:
+            effective_consistency_min = self.config["consistency_min"]
 
         gating_reasons: List[str] = []
         if warmup:
@@ -324,7 +336,7 @@ class CoreAlgorithm:
             gating_reasons.append(f"spread_bps>{self.config['spread_bps_cap']}")
         if lag_sec > self.config["lag_cap_sec"]:
             gating_reasons.append(f"lag_sec>{self.config['lag_cap_sec']}")
-        if consistency < self.config["consistency_min"]:
+        if consistency < effective_consistency_min:
             gating_reasons.append("low_consistency")
         if abs(score) < self.config["weak_signal_threshold"] and not warmup:
             gating_reasons.append("weak_signal")
@@ -358,7 +370,7 @@ class CoreAlgorithm:
             "confirm": confirm,
             "gating": bool(gating_reasons),
             "signal_type": signal_type,
-            "guard_reason": gating_reasons[0] if gating_reasons else None,
+            "guard_reason": ",".join(gating_reasons) if gating_reasons else None,  # 保存所有原因（逗号分隔）
         }
 
         if confirm:

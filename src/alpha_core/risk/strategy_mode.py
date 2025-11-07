@@ -176,11 +176,14 @@ class StrategyModeManager:
         
         # 安全的时区处理
         try:
-            timezone_str = schedule_config.get('timezone', 'UTC')
+            timezone_str = schedule_config.get('timezone', 'Asia/Tokyo')  # 默认使用 Asia/Tokyo
             self.timezone = pytz.timezone(timezone_str)
         except Exception as e:
-            logger.warning(f"Failed to create timezone {timezone_str}, falling back to UTC: {e}")
-            self.timezone = pytz.UTC
+            logger.warning(f"Failed to create timezone {timezone_str}, falling back to Asia/Tokyo: {e}")
+            try:
+                self.timezone = pytz.timezone('Asia/Tokyo')
+            except Exception:
+                self.timezone = pytz.UTC  # 最后的 fallback
         self.calendar = schedule_config.get('calendar', 'CRYPTO')
         self.enabled_weekdays = schedule_config.get('enabled_weekdays', ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'])
         self.holidays = schedule_config.get('holidays', [])
@@ -508,9 +511,9 @@ class StrategyModeManager:
         # 检查星期几
         # P0: 空列表视为"所有星期都启用"（类似 active_windows 为空=全天有效）
         if self.enabled_weekdays:
-        weekday = dt.strftime('%a')  # Mon, Tue, Wed, ...
-        if weekday not in self.enabled_weekdays:
-            return False
+            weekday = dt.strftime('%a')  # Mon, Tue, Wed, ...
+            if weekday not in self.enabled_weekdays:
+                return False
         
         # 检查节假日
         date_str = dt.strftime('%Y-%m-%d')

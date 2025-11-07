@@ -2632,30 +2632,63 @@ class SuccessOFICVDHarvester:
         try:
             # 等待所有任务完成（移除超时限制，支持7x24小时运行）
             await asyncio.gather(*tasks, return_exceptions=True)
+        except (GeneratorExit, asyncio.CancelledError):
+            # 正常取消，不需要记录错误
+            logger.info("采集任务被取消")
         except Exception as e:
             logger.error(f"运行错误: {e}")
         finally:
-            # 停止运行
-            logger.info("准备停止采集，开始保存剩余数据...")
+            # 停止运行标志
             self.running = False
+            
+            # 检查事件循环是否还在运行
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # 事件循环已关闭，无法进行异步操作
+                logger.warning("事件循环已关闭，跳过数据保存")
+                return
+            
+            # 取消所有任务
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            
+            # 等待任务取消完成（给任务时间清理资源）
+            if tasks:
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                except Exception:
+                    pass  # 忽略取消时的异常
+            
             # 短暂停顿，让流任务自然break
-            await asyncio.sleep(0.1)
+            try:
+                await asyncio.sleep(0.1)
+            except RuntimeError:
+                # 事件循环可能在 sleep 期间关闭
+                logger.warning("事件循环在清理期间关闭")
+                return
             
             # 保存剩余数据（加锁保证原子性）
-            async with self.rotation_lock:
-                for symbol in self.symbols:
-                    # 最后生成一次特征宽表
-                    self._generate_features_table(symbol)
-                    
-                    # 保存权威库数据（prices, orderbook）
-                    for kind in ['prices', 'orderbook']:
-                        if self.data_buffers[kind][symbol]:
-                            await self._save_data(symbol, kind)
-                    
-                    # 保存预览库数据（ofi, cvd, fusion, events, features）
-                    for kind in self.preview_kinds:
-                        if self.data_buffers[kind][symbol]:
-                            await self._save_data(symbol, kind)
+            try:
+                async with self.rotation_lock:
+                    for symbol in self.symbols:
+                        # 最后生成一次特征宽表
+                        self._generate_features_table(symbol)
+                        
+                        # 保存权威库数据（prices, orderbook）
+                        for kind in ['prices', 'orderbook']:
+                            if self.data_buffers[kind][symbol]:
+                                await self._save_data(symbol, kind)
+                        
+                        # 保存预览库数据（ofi, cvd, fusion, events, features）
+                        for kind in self.preview_kinds:
+                            if self.data_buffers[kind][symbol]:
+                                await self._save_data(symbol, kind)
+            except RuntimeError as e:
+                # 事件循环可能在保存期间关闭
+                logger.warning(f"事件循环在保存数据期间关闭: {e}")
+                return
             
             # 打印统计信息
             logger.info("数据采集完成，统计信息:")

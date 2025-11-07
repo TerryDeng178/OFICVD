@@ -194,7 +194,7 @@ async def run_harvest(config: dict):
         
         return 0
         
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("收到 SIGINT，优雅退出")
         return 0
     except Exception as e:
@@ -255,8 +255,12 @@ def main():
     args = parse_args()
     
     try:
+        # 使用 asyncio.run() 运行异步主函数
+        # asyncio.run() 会自动处理事件循环的创建和清理
         exitcode = asyncio.run(main_async(args))
     except KeyboardInterrupt:
+        # KeyboardInterrupt 在 asyncio.run() 中会被正确处理
+        # 事件循环会优雅关闭，所有任务会被取消
         logger.info("收到 SIGINT，优雅退出")
         exitcode = 0
     except Exception as e:

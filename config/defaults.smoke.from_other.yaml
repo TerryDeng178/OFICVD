@@ -1,0 +1,111 @@
+# -*- coding: utf-8 -*-
+# OFI+CVD 交易系统 - 冒烟测试专用配置（来自另一个项目）
+# 阈值更松，目的是先产出少量 confirm
+
+paths:
+  data_root: "${OFICVD_DATA_ROOT:./deploy/data/ofi_cvd}"
+  artifacts_root: "${OFICVD_ARTIFACTS_ROOT:./deploy/artifacts/ofi_cvd}"
+  timezone: "UTC"
+  layer: "raw"
+
+symbols:
+  - "BTCUSDT"
+  - "ETHUSDT"
+  - "BNBUSDT"
+  - "SOLUSDT"
+  - "XRPUSDT"
+  - "DOGEUSDT"
+
+harvest:
+  rotate:
+    max_rows: 500000
+    max_sec: 300
+  kinds:
+    raw: ["prices", "orderbook", "aggtrade", "depth"]
+    preview: ["ofi", "cvd", "fusion", "divergence", "events", "features"]
+  dq:
+    stale_ms: 1500
+    require_fields: ["ts_ms", "symbol", "row_id"]
+    min_price: 0.0
+    min_qty: 0.0
+
+system:
+  version: "v4.0.0"
+  environment: "smoke"
+
+features:
+  ofi:
+    window_ms: 5000
+    zscore_window: 30000
+    levels: 5
+    weights: [0.4, 0.25, 0.2, 0.1, 0.05]
+    ema_alpha: 0.2
+  cvd:
+    window_ms: 60000
+    z_mode: "delta"
+  fusion:
+    method: zsum
+    w_ofi: 0.6
+    w_cvd: 0.4
+    # 由"另一个项目"的口径改写成本仓库的 schema，但保持 smoke 更松的门槛
+    fuse_buy: 0.50
+    fuse_strong_buy: 1.00
+    fuse_sell: -0.50
+    fuse_strong_sell: -1.00
+    # 来自另项目的机制参数（已映射到本项目字段）
+    rearm_on_flip: true
+    flip_rearm_margin: 0.05
+    adaptive_cooldown_enabled: true
+    adaptive_cooldown_k: 0.7
+    cooldown_secs: 0.3
+    hysteresis_exit: 0.6
+    min_consecutive: 1
+    # 预留 regime 档（如策略模式判定生效，会自动用更严的档）
+    regime_thresholds:
+      active: { fuse_buy: 0.70, fuse_strong_buy: 1.20, fuse_sell: -0.70, fuse_strong_sell: -1.20 }
+      normal: { fuse_buy: 0.85, fuse_strong_buy: 1.40, fuse_sell: -0.85, fuse_strong_sell: -1.40 }
+      quiet:  { fuse_buy: 1.10, fuse_strong_buy: 1.80, fuse_sell: -1.10, fuse_strong_sell: -1.80 }
+  divergence:
+    swing_L: 13
+    ema_k: 5
+    z_hi: 1.6
+    z_mid: 0.6
+
+sink:
+  kind: jsonl
+  output_dir: ./runtime
+
+signal:
+  dedupe_ms: 250
+  weak_signal_threshold: 0.10   # 另项目 0.05 偏松，这里稍收一档，仍然易出样本
+  consistency_min: 0.08         # 另项目常见 0.30 偏严，冒烟先 0.08
+  spread_bps_cap: 20.0
+  lag_cap_sec: 3.0
+  weights:
+    w_ofi: 0.6
+    w_cvd: 0.4
+  activity:
+    active_min_tps: 3.0         # 触发 active 的最低 TPS
+    normal_min_tps: 1.0
+  thresholds:
+    base:
+      buy: 0.6
+      strong_buy: 1.2
+      sell: -0.6
+      strong_sell: -1.2
+    active:
+      buy: 0.5
+      strong_buy: 1.0
+      sell: -0.5
+      strong_sell: -1.0
+    quiet:
+      buy: 0.40                 # 使用更松的阈值
+      strong_buy: 1.0
+      sell: -0.40
+      strong_sell: -1.0
+  sink:
+    kind: jsonl
+    output_dir: ./runtime
+  replay_mode: 1
+  debug: true
+
