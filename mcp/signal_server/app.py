@@ -148,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CORE_ALGO MCP thin shell")
     parser.add_argument("--config", help="Path to YAML configuration (defaults.yaml)")
     parser.add_argument("--input", default="-", help="Feature JSONL (file/dir/- for stdin)")
-    parser.add_argument("--sink", choices=["jsonl", "sqlite", "null"], help="Override sink kind")
+    parser.add_argument("--sink", choices=["jsonl", "sqlite", "null", "dual"], help="Override sink kind (dual = jsonl + sqlite)")
     parser.add_argument("--out", help="Override output directory (default ./runtime)")
     parser.add_argument("--symbols", nargs="*", help="Optional symbol whitelist (e.g. BTCUSDT ETHUSDT)")
     parser.add_argument("--watch", action="store_true", help="Watch input directory for new files (continuous mode)")

@@ -209,14 +209,36 @@ class Supervisor:
             if not keywords and keyword:
                 keywords = [keyword]
             
-            if keywords and state.stdout_log and state.stdout_log.exists():
-                try:
-                    content = state.stdout_log.read_text(encoding="utf-8", errors="replace")
-                    for kw in keywords:
-                        if kw in content:
-                            return True
-                except Exception:
-                    pass
+            # P1: 就绪探针（log_keyword）读取尾部而非整文件
+            # 同时检查 stdout 和 stderr（某些进程可能将日志输出到 stderr，如 Broker）
+            log_files = []
+            if state.stdout_log and state.stdout_log.exists():
+                log_files.append(state.stdout_log)
+            if state.stderr_log and state.stderr_log.exists():
+                log_files.append(state.stderr_log)
+            
+            for log_file in log_files:
+                if keywords:
+                    try:
+                        # 对于新启动的进程，同时检查日志开头和尾部
+                        # 开头部分（前 32KB）：包含启动日志
+                        # 尾部部分（后 64KB）：包含最新日志
+                        with log_file.open("rb") as fp:
+                            # 读取开头部分
+                            head = fp.read(32 * 1024).decode("utf-8", errors="replace")
+                            # 读取尾部部分
+                            fp.seek(0, 2)  # 移动到文件末尾
+                            size = fp.tell()
+                            fp.seek(max(0, size - 64 * 1024), 0)  # 只读最后 64KB
+                            tail = fp.read().decode("utf-8", errors="replace")
+                        
+                        # 合并开头和尾部内容进行搜索
+                        content = head + tail
+                        for kw in keywords:
+                            if kw in content:
+                                return True
+                    except Exception:
+                        pass
         
         elif spec.ready_probe == "file_exists":
             pattern = spec.ready_probe_args.get("pattern", "")
@@ -240,6 +262,12 @@ class Supervisor:
                 if db_full_path.exists():
                     try:
                         conn = sqlite3.connect(str(db_full_path), timeout=1.0)
+                        # P0: SQLite 就绪探针增加 schema 检测
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='signals'")
+                        if not cursor.fetchone():
+                            conn.close()
+                            return False
                         conn.close()
                         return True
                     except Exception:
@@ -399,6 +427,19 @@ class Supervisor:
                             current_time_ms = int(time.time() * 1000)
                             window_start_ms = current_time_ms - (min_growth_window_seconds * 1000)
                             
+                            # P0: SQLite 健康探针 - 缺表/空表时给出明确信号
+                            # 先检查 signals 表是否存在
+                            try:
+                                cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='signals'")
+                                if cursor.fetchone()[0] == 0:
+                                    logger.warning("[health] signals 表不存在")
+                                    conn.close()
+                                    return False
+                            except Exception as e:
+                                logger.warning(f"[health] 检查 signals 表失败: {e}")
+                                conn.close()
+                                return False
+                            
                             # 查询最近窗口内的行数（假设有 ts_ms 字段）
                             try:
                                 cursor.execute("""
@@ -410,9 +451,11 @@ class Supervisor:
                                 if recent_count < min_growth_count:
                                     conn.close()
                                     return False
-                            except sqlite3.OperationalError:
-                                # 表或字段不存在，跳过增长检查
-                                pass
+                            except sqlite3.OperationalError as op_e:
+                                # P0: 表或字段不存在，明确失败并告警
+                                logger.warning(f"[health] SQLite 查询失败（表或字段缺失）: {op_e}")
+                                conn.close()
+                                return False
                         
                         conn.close()
                         return True
@@ -474,10 +517,44 @@ class Supervisor:
 class Reporter:
     """日报生成器"""
     
+    # P0: Reporter 规范化护栏原因（guard_reason）别名→规范名映射表
+    GUARD_REASON_NORMALIZATION = {
+        "weak_signal": "weak_signal",
+        "weak_signal_throttle": "weak_signal",
+        "warmup": "warmup",
+        "component_warmup": "warmup",
+        "low_consistency": "low_consistency",
+        "spread": "spread",
+        "lag": "lag",
+        "activity": "activity",
+        "other": "other",
+    }
+    
     def __init__(self, project_root: Path, output_dir: Path):
         self.project_root = project_root
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        # P0: 统一 Reporter 时区与业务时区
+        import pytz
+        report_tz_str = os.getenv("REPORT_TZ", "UTC")
+        try:
+            self.tz = pytz.timezone(report_tz_str)
+        except Exception:
+            logger.warning(f"无效的时区配置 REPORT_TZ={report_tz_str}，使用 UTC")
+            self.tz = pytz.UTC
+    
+    def _normalize_guard_reason(self, reason: str) -> str:
+        """规范化护栏原因名称，统一别名到规范名"""
+        reason_lower = reason.lower().strip()
+        # 先尝试精确匹配
+        if reason_lower in self.GUARD_REASON_NORMALIZATION:
+            return self.GUARD_REASON_NORMALIZATION[reason_lower]
+        # 尝试前缀匹配（如 "weak_signal_xxx" -> "weak_signal"）
+        for key, normalized in self.GUARD_REASON_NORMALIZATION.items():
+            if reason_lower.startswith(key):
+                return normalized
+        # 默认返回原值（小写）
+        return reason_lower
     
     def generate_report(self, sink_kind: str, runtime_dir: Path) -> Dict:
         """生成日报"""
@@ -498,10 +575,30 @@ class Reporter:
             "warnings": [],
             "gating_breakdown": {},  # 护栏分解统计（总体）
             "gating_breakdown_by_regime": {},  # P1-E: 按 regime 分组的护栏分解
-            "gating_breakdown_by_minute": []  # P1-E: 按分钟分组的护栏分解
+            "gating_breakdown_by_minute": [],  # P1-E: 按分钟分组的护栏分解
+            # P1-C: 报表补充"处理吞吐"与"重叠窗口摘要"
+            "rows_processed": 0,  # 处理的总行数（包括未确认）
+            "files_read": 0,  # 读取的文件数
+            "first_minute": None,  # 第一个分钟键
+            "last_minute": None  # 最后一个分钟键
         }
         
-        if sink_kind == "jsonl":
+        # P1: 事件→信号联动数据准备
+        report["event_signal_linkage"] = {
+            "events": {},
+            "linkage": {}
+        }
+        
+        # P1: 时序库导出数据准备
+        report["timeseries_data"] = {
+            "total": 0,
+            "gating_breakdown": {},
+            "strong_ratio": 0.0,
+            "per_minute": []
+        }
+        
+        # P0: 双 Sink 模式下，优先使用 JSONL 分析（SQLite 会在 Reporter 中单独验证）
+        if sink_kind in ("jsonl", "dual"):
             self._analyze_jsonl(runtime_dir, report)
         elif sink_kind == "sqlite":
             self._analyze_sqlite(runtime_dir, report)
@@ -513,6 +610,15 @@ class Reporter:
             report["strong_ratio"] = (report["strong_buy_count"] + report["strong_sell_count"]) / report["total"]
         else:
             report["sell_ratio"] = 0.0
+        
+        # P1: 准备时序库导出数据
+        report["timeseries_data"]["total"] = report["total"]
+        report["timeseries_data"]["gating_breakdown"] = report["gating_breakdown"]
+        report["timeseries_data"]["strong_ratio"] = report["strong_ratio"]
+        report["timeseries_data"]["per_minute"] = report["per_minute"]
+        
+        # P1: 导出到时序库（如果配置了）
+        self._export_to_timeseries(report)
         
         return report
     
@@ -529,11 +635,15 @@ class Reporter:
             report["warnings"].append("未找到信号文件")
             return
         
+        # P1-C: 报表补充"处理吞吐"与"重叠窗口摘要"
+        report["files_read"] = len(jsonl_files)
+        
         # 按分钟统计
         minute_counts = defaultdict(int)
         minute_timestamps = []
         total_signals = 0  # 所有信号（包括未确认）
         confirmed_signals = 0  # 确认的信号
+        bad_lines = 0  # P1: Reporter 增加"错误/丢弃计数"
         
         for jsonl_file in jsonl_files:
             try:
@@ -561,7 +671,11 @@ class Reporter:
                                 else:
                                     reasons = [guard_reason]
                                 
-                                for reason in reasons:
+                                # P0: Reporter 规范化护栏原因（guard_reason）别名→规范名映射
+                                # 统一命名，保证统计维度稳定
+                                normalized_reasons = [self._normalize_guard_reason(r) for r in reasons if r]
+                                
+                                for reason in normalized_reasons:
                                     if reason:
                                         # 总体统计
                                         report["gating_breakdown"][reason] = report["gating_breakdown"].get(reason, 0) + 1
@@ -607,10 +721,20 @@ class Reporter:
                                 minute_key = int(ts_sec / 60)
                                 minute_counts[minute_key] += 1
                                 minute_timestamps.append((minute_key, ts_sec))
+                                # P1-C: 记录第一个和最后一个分钟键
+                                if report["first_minute"] is None or minute_key < report["first_minute"]:
+                                    report["first_minute"] = minute_key
+                                if report["last_minute"] is None or minute_key > report["last_minute"]:
+                                    report["last_minute"] = minute_key
                         except json.JSONDecodeError:
+                            # P1: Reporter 增加"错误/丢弃计数"
+                            bad_lines += 1
                             continue
             except Exception as e:
                 report["warnings"].append(f"读取文件失败 {jsonl_file}: {e}")
+        
+        # P1-C: 记录处理的总行数
+        report["rows_processed"] = total_signals
         
         # 计算最近5分钟的节律
         if minute_timestamps:
@@ -618,8 +742,18 @@ class Reporter:
             for i in range(5):
                 minute_key = latest_minute - i
                 count = minute_counts.get(minute_key, 0)
+                # P1: 分钟键更友好（同时保存人类可读时间）
+                # P0: 统一 Reporter 时区与业务时区
+                try:
+                    from datetime import datetime
+                    minute_ts_ms = minute_key * 60000
+                    dt = datetime.fromtimestamp(minute_ts_ms / 1000, tz=self.tz)
+                    human_readable = dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    human_readable = None
                 report["per_minute"].append({
                     "minute": minute_key,
+                    "minute_human": human_readable,  # P1: 人类可读时间
                     "count": count
                 })
             report["per_minute"].reverse()
@@ -634,15 +768,25 @@ class Reporter:
                         report["gating_breakdown_by_minute"].append({})
                 delattr(self, '_minute_gating_dict')
         
-        # 添加告警
+        # P0: Reporter 告警细分（定位更快）
         if report["total"] == 0:
-            report["warnings"].append("QUIET_RUN")
+            if not jsonl_files:
+                report["warnings"].append("NO_INPUT_FILES")
+            elif total_signals > 0:
+                report["warnings"].append("ALL_GATED")
+            else:
+                report["warnings"].append("QUIET_RUN")
         
         if report["per_minute"] and all(item["count"] == 0 for item in report["per_minute"]):
             report["warnings"].append("QUIET_RUN")
         
         if confirmed_signals == 0 and total_signals > 0:
             report["warnings"].append("NO_CONFIRMED_SIGNALS")
+        
+        # P1: Reporter 增加"错误/丢弃计数"
+        if bad_lines > 0:
+            report["warnings"].append(f"BAD_JSON_LINES={bad_lines}")
+            report["dropped_bad_json"] = bad_lines
     
     def _analyze_sqlite(self, runtime_dir: Path, report: Dict):
         """分析 SQLite 数据库"""
@@ -707,11 +851,43 @@ class Reporter:
                 LIMIT 5
             """)
             for minute_key, count in cursor.fetchall():
+                # P1: 分钟键更友好（同时保存人类可读时间）
+                # P0: 统一 Reporter 时区与业务时区
+                try:
+                    from datetime import datetime
+                    minute_ts_ms = minute_key * 60000
+                    dt = datetime.fromtimestamp(minute_ts_ms / 1000, tz=self.tz)
+                    human_readable = dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    human_readable = None
                 report["per_minute"].append({
                     "minute": minute_key,
+                    "minute_human": human_readable,  # P1: 人类可读时间
                     "count": count
                 })
             report["per_minute"].reverse()
+            
+            # P0: 填充 files_read 和 rows_processed（SQLite 无法直接获取，但可以从数据库统计）
+            # 统计总行数（包括未确认的信号）
+            cursor.execute("SELECT COUNT(*) FROM signals")
+            report["rows_processed"] = cursor.fetchone()[0]
+            
+            # 统计文件数（通过不同的 ts_ms 范围估算，或从数据库元数据获取）
+            # 由于 SQLite 不直接记录文件信息，这里使用一个估算值
+            # 实际应该从 run_manifest 或其他地方获取
+            report["files_read"] = 0  # SQLite 模式下无法直接获取文件数
+            
+            # P0: 填充 first_minute 和 last_minute
+            cursor.execute("SELECT MIN(ts_ms), MAX(ts_ms) FROM signals WHERE confirm = 1")
+            result = cursor.fetchone()
+            if result and result[0] and result[1]:
+                min_ts_ms = result[0]
+                max_ts_ms = result[1]
+                report["first_minute"] = min_ts_ms // 60000
+                report["last_minute"] = max_ts_ms // 60000
+            else:
+                report["first_minute"] = None
+                report["last_minute"] = None
             
             # 查询总信号数（包括未确认）用于告警
             cursor.execute("SELECT COUNT(*) FROM signals")
@@ -734,9 +910,14 @@ class Reporter:
                 else:
                     report["gating_breakdown"][reason] = report["gating_breakdown"].get(reason, 0) + count
             
-            # 添加告警
+            # P0: Reporter 告警细分（定位更快）
             if report["total"] == 0:
-                report["warnings"].append("QUIET_RUN")
+                if total_signals == 0:
+                    report["warnings"].append("NO_INPUT_FILES")
+                elif total_signals > 0:
+                    report["warnings"].append("ALL_GATED")
+                else:
+                    report["warnings"].append("QUIET_RUN")
             
             if report["per_minute"] and all(item["count"] == 0 for item in report["per_minute"]):
                 report["warnings"].append("QUIET_RUN")
@@ -764,6 +945,262 @@ class Reporter:
                 self._write_markdown(report, fp)
             logger.info(f"日报已保存: {md_path}")
     
+    def _export_to_timeseries(self, report: Dict):
+        """P1: 导出数据到时序库（如果配置了）"""
+        # 检查是否配置了时序库导出
+        timeseries_enabled = os.getenv("TIMESERIES_ENABLED", "0") == "1"
+        if not timeseries_enabled:
+            return
+        
+        timeseries_type = os.getenv("TIMESERIES_TYPE", "prometheus").lower()
+        timeseries_url = os.getenv("TIMESERIES_URL", "")
+        
+        if not timeseries_url:
+            logger.warning("[timeseries] TIMESERIES_URL 未配置，跳过时序库导出")
+            return
+        
+        try:
+            ts_data = report.get("timeseries_data", {})
+            timestamp = report.get("timestamp", datetime.utcnow().isoformat())
+            
+            # 推送指标
+            if timeseries_type == "prometheus":
+                self._export_to_prometheus(ts_data, timestamp, timeseries_url)
+            elif timeseries_type == "influxdb":
+                self._export_to_influxdb(ts_data, timestamp, timeseries_url)
+            else:
+                logger.warning(f"[timeseries] 不支持的时序库类型: {timeseries_type}")
+        except Exception as e:
+            logger.warning(f"[timeseries] 导出失败: {e}")
+    
+    def _export_to_prometheus(self, ts_data: Dict, timestamp: str, url: str):
+        """导出到 Prometheus Pushgateway"""
+        try:
+            import requests
+            
+            # 构建指标
+            metrics = []
+            
+            # total 指标
+            total = ts_data.get("total", 0)
+            metrics.append(f"signal_total {total}")
+            
+            # strong_ratio 指标
+            strong_ratio = ts_data.get("strong_ratio", 0.0)
+            metrics.append(f"signal_strong_ratio {strong_ratio}")
+            
+            # gating_breakdown 指标
+            gating_breakdown = ts_data.get("gating_breakdown", {})
+            for reason, count in gating_breakdown.items():
+                reason_safe = reason.replace(".", "_").replace("-", "_")
+                metrics.append(f'signal_gating_breakdown{{reason="{reason_safe}"}} {count}')
+            
+            # per_minute 指标（每分钟总量）
+            per_minute = ts_data.get("per_minute", [])
+            for minute_data in per_minute:
+                minute = minute_data.get("minute", "")
+                total_minute = minute_data.get("count", 0)
+                metrics.append(f'signal_per_minute_total{{minute="{minute}"}} {total_minute}')
+            
+            # 推送到 Pushgateway
+            metrics_text = "\n".join(metrics)
+            response = requests.post(
+                f"{url}/metrics/job/signal_reporter",
+                data=metrics_text,
+                headers={"Content-Type": "text/plain"},
+                timeout=5
+            )
+            response.raise_for_status()
+            logger.info(f"[timeseries] 已导出 {len(metrics)} 个指标到 Prometheus")
+        except ImportError:
+            logger.warning("[timeseries] requests 库未安装，无法导出到 Prometheus")
+        except Exception as e:
+            logger.warning(f"[timeseries] Prometheus 导出失败: {e}")
+    
+    def _export_to_influxdb(self, ts_data: Dict, timestamp: str, url: str):
+        """导出到 InfluxDB"""
+        try:
+            import requests
+            
+            # 构建数据点
+            points = []
+            
+            # total 指标
+            total = ts_data.get("total", 0)
+            points.append({
+                "measurement": "signal_total",
+                "time": timestamp,
+                "fields": {"value": total}
+            })
+            
+            # strong_ratio 指标
+            strong_ratio = ts_data.get("strong_ratio", 0.0)
+            points.append({
+                "measurement": "signal_strong_ratio",
+                "time": timestamp,
+                "fields": {"value": strong_ratio}
+            })
+            
+            # gating_breakdown 指标
+            gating_breakdown = ts_data.get("gating_breakdown", {})
+            for reason, count in gating_breakdown.items():
+                points.append({
+                    "measurement": "signal_gating_breakdown",
+                    "time": timestamp,
+                    "tags": {"reason": reason},
+                    "fields": {"value": count}
+                })
+            
+            # 推送到 InfluxDB
+            data = {"points": points}
+            response = requests.post(
+                f"{url}/write",
+                json=data,
+                timeout=5
+            )
+            response.raise_for_status()
+            logger.info(f"[timeseries] 已导出 {len(points)} 个数据点到 InfluxDB")
+        except ImportError:
+            logger.warning("[timeseries] requests 库未安装，无法导出到 InfluxDB")
+        except Exception as e:
+            logger.warning(f"[timeseries] InfluxDB 导出失败: {e}")
+    
+    def _check_alerts(self, report: Dict):
+        """P1: 检查告警规则"""
+        alerts = []
+        
+        # 告警规则 1: 连续 2 分钟 total == 0
+        per_minute = report.get("per_minute", [])
+        if len(per_minute) >= 2:
+            last_two_minutes = per_minute[-2:]
+            if all(m.get("count", 0) == 0 for m in last_two_minutes):
+                alerts.append({
+                    "level": "critical",
+                    "rule": "total_zero_2min",
+                    "message": "连续 2 分钟信号总量为 0",
+                    "details": {
+                        "minutes": [m.get("minute") for m in last_two_minutes]
+                    }
+                })
+        
+        # 告警规则 2: low_consistency 占比单分钟 > 80%
+        gating_by_minute = report.get("gating_breakdown_by_minute", [])
+        for i, minute_data in enumerate(per_minute):
+            if i < len(gating_by_minute):
+                minute = minute_data.get("minute", "")
+                gating_breakdown = gating_by_minute[i]
+                total_minute = minute_data.get("count", 0)
+                
+                if total_minute > 0:
+                    low_consistency_count = gating_breakdown.get("low_consistency", 0)
+                    low_consistency_ratio = low_consistency_count / total_minute
+                    
+                    if low_consistency_ratio > 0.8:
+                        alerts.append({
+                            "level": "warning",
+                            "rule": "low_consistency_high",
+                            "message": f"分钟 {minute} low_consistency 占比 {low_consistency_ratio:.2%} > 80%",
+                            "details": {
+                                "minute": minute,
+                                "ratio": low_consistency_ratio,
+                                "count": low_consistency_count,
+                                "total": total_minute
+                            }
+                        })
+        
+        # 告警规则 3: strong_ratio 短时崩塌（较 7 日移动中位数偏差 > 3σ）
+        # 注意：这需要历史数据，当前实现仅做示例
+        current_strong_ratio = report.get("strong_ratio", 0.0)
+        # TODO: 从时序库读取 7 日移动中位数和标准差
+        # 这里仅做示例，实际需要从时序库查询
+        if current_strong_ratio < 0.01:  # 示例阈值
+            alerts.append({
+                "level": "warning",
+                "rule": "strong_ratio_collapse",
+                "message": f"强信号比例异常低: {current_strong_ratio:.2%}",
+                "details": {
+                    "current_ratio": current_strong_ratio
+                }
+            })
+        
+        return alerts
+    
+    def _collect_runtime_state(self, report: Dict, supervisor):
+        """P1: 汇总 StrategyMode 快照到 runtime_state"""
+        runtime_state = {
+            "snapshots": [],
+            "summary": {}
+        }
+        
+        # 查找 signal 进程的日志文件
+        signal_state = supervisor.processes.get("signal")
+        if not signal_state or not signal_state.stdout_log:
+            report["runtime_state"] = runtime_state
+            return
+        
+        log_file = signal_state.stdout_log
+        if not log_file.exists():
+            report["runtime_state"] = runtime_state
+            return
+        
+        try:
+            # 读取日志文件，提取 StrategyMode 快照
+            import json
+            snapshots = []
+            
+            with log_file.open("r", encoding="utf-8", errors="replace") as fp:
+                for line in fp:
+                    line = line.strip()
+                    if "[StrategyMode]" in line:
+                        # 提取 JSON 部分
+                        json_start = line.find("{")
+                        if json_start >= 0:
+                            try:
+                                snapshot_json = line[json_start:]
+                                snapshot = json.loads(snapshot_json)
+                                snapshots.append(snapshot)
+                            except json.JSONDecodeError:
+                                continue
+            
+            # 汇总统计
+            if snapshots:
+                # 按 symbol 分组
+                by_symbol = {}
+                for snapshot in snapshots:
+                    symbol = snapshot.get("symbol", "UNKNOWN")
+                    if symbol not in by_symbol:
+                        by_symbol[symbol] = []
+                    by_symbol[symbol].append(snapshot)
+                
+                # 计算汇总统计
+                all_trades_per_min = [s.get("trades_per_min", 0) for s in snapshots]
+                all_quotes_per_sec = [s.get("quotes_per_sec", 0) for s in snapshots]
+                all_spread_bps = [s.get("spread_bps", 0) for s in snapshots]
+                
+                runtime_state["summary"] = {
+                    "total_snapshots": len(snapshots),
+                    "symbols": list(by_symbol.keys()),
+                    "avg_trades_per_min": sum(all_trades_per_min) / len(all_trades_per_min) if all_trades_per_min else 0.0,
+                    "avg_quotes_per_sec": sum(all_quotes_per_sec) / len(all_quotes_per_sec) if all_quotes_per_sec else 0.0,
+                    "avg_spread_bps": sum(all_spread_bps) / len(all_spread_bps) if all_spread_bps else 0.0,
+                    "min_trades_per_min": min(all_trades_per_min) if all_trades_per_min else 0.0,
+                    "max_trades_per_min": max(all_trades_per_min) if all_trades_per_min else 0.0,
+                    "min_spread_bps": min(all_spread_bps) if all_spread_bps else 0.0,
+                    "max_spread_bps": max(all_spread_bps) if all_spread_bps else 0.0,
+                }
+                
+                # 保存最近的快照（每个 symbol 最多 5 个）
+                recent_snapshots = []
+                for symbol, symbol_snapshots in by_symbol.items():
+                    recent_snapshots.extend(sorted(symbol_snapshots, key=lambda x: x.get("ts_ms", 0), reverse=True)[:5])
+                
+                runtime_state["snapshots"] = sorted(recent_snapshots, key=lambda x: x.get("ts_ms", 0), reverse=True)[:20]
+            
+            report["runtime_state"] = runtime_state
+        except Exception as e:
+            logger.warning(f"[runtime_state] 收集失败: {e}")
+            report["runtime_state"] = runtime_state
+    
     def _write_markdown(self, report: Dict, fp):
         """写入 Markdown 格式"""
         fp.write(f"# 信号日报\n\n")
@@ -780,10 +1217,20 @@ class Reporter:
         
         if report['per_minute']:
             fp.write(f"## 最近5分钟节律\n\n")
-            fp.write(f"| 分钟 | 信号数 |\n")
-            fp.write(f"|------|--------|\n")
+            fp.write(f"| 分钟（人类可读） | 分钟键 | 信号数 |\n")
+            fp.write(f"|---------------|--------|--------|\n")
             for item in report['per_minute']:
-                fp.write(f"| {item['minute']} | {item['count']} |\n")
+                minute_key = item['minute']
+                # P1: 分钟键更友好（人类可读时分）
+                # P0: 统一 Reporter 时区与业务时区
+                try:
+                    from datetime import datetime
+                    minute_ts_ms = minute_key * 60000
+                    dt = datetime.fromtimestamp(minute_ts_ms / 1000, tz=self.tz)
+                    human_readable = dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    human_readable = f"minute_{minute_key}"
+                fp.write(f"| {human_readable} | {minute_key} | {item['count']} |\n")
             fp.write(f"\n")
         
         if report.get('gating_breakdown'):
@@ -797,9 +1244,43 @@ class Reporter:
                 fp.write(f"| {reason} | {count} | {pct:.1f}% |\n")
             fp.write(f"\n")
             
-            # P1-E: 按 regime 分组的护栏分解
+            # P1: 按 Regime 的护栏分解与分时展示
+            # 在日报中把"Quiet vs Active"各自的 low_consistency / weak_signal / warmup 占比画出
             if report.get('gating_breakdown_by_regime'):
-                fp.write(f"### 按 Regime 分组\n\n")
+                fp.write(f"### 按 Regime 分组（Quiet vs Active 对比）\n\n")
+                
+                # 计算每个 regime 的总护栏数
+                regime_totals = {}
+                for regime, breakdown in report['gating_breakdown_by_regime'].items():
+                    regime_totals[regime] = sum(breakdown.values())
+                
+                # 重点关注的护栏原因（用于对比展示）
+                key_reasons = ["low_consistency", "weak_signal", "warmup", "spread", "lag"]
+                
+                # 生成对比表格
+                fp.write(f"| Regime | 总护栏数 | ")
+                for reason in key_reasons:
+                    fp.write(f"{reason} | ")
+                fp.write(f"\n")
+                fp.write(f"|--------|---------|")
+                for _ in key_reasons:
+                    fp.write(f"--------|")
+                fp.write(f"\n")
+                
+                for regime in ["active", "normal", "quiet"]:
+                    if regime in report['gating_breakdown_by_regime']:
+                        breakdown = report['gating_breakdown_by_regime'][regime]
+                        regime_total = regime_totals.get(regime, 0)
+                        fp.write(f"| {regime.upper()} | {regime_total} | ")
+                        for reason in key_reasons:
+                            count = breakdown.get(reason, 0)
+                            pct = (count / regime_total * 100) if regime_total > 0 else 0.0
+                            fp.write(f"{count} ({pct:.1f}%) | ")
+                        fp.write(f"\n")
+                fp.write(f"\n")
+                
+                # 详细分解（保留原有格式）
+                fp.write(f"### 详细分解\n\n")
                 for regime, breakdown in sorted(report['gating_breakdown_by_regime'].items()):
                     fp.write(f"#### {regime.upper()}\n\n")
                     fp.write(f"| 护栏原因 | 触发次数 | 占比 |\n")
@@ -813,17 +1294,27 @@ class Reporter:
             # P1-E: 按分钟分组的护栏分解（最近5分钟）
             if report.get('gating_breakdown_by_minute') and report.get('per_minute'):
                 fp.write(f"### 按分钟分组（最近5分钟）\n\n")
-                fp.write(f"| 分钟 | 护栏原因 | 触发次数 |\n")
-                fp.write(f"|------|---------|---------|\n")
+                fp.write(f"| 分钟（人类可读） | 分钟键 | 护栏原因 | 触发次数 |\n")
+                fp.write(f"|---------------|--------|---------|---------|\n")
                 for i, minute_item in enumerate(report['per_minute'][-5:]):
                     minute_key = minute_item['minute']
+                    # P1: 分钟键更友好（人类可读时分）
+                    # P0: 统一 Reporter 时区与业务时区
+                    try:
+                        from datetime import datetime
+                        minute_ts_ms = minute_key * 60000
+                        dt = datetime.fromtimestamp(minute_ts_ms / 1000, tz=self.tz)
+                        human_readable = dt.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        human_readable = f"minute_{minute_key}"
+                    
                     if i < len(report['gating_breakdown_by_minute']):
                         minute_breakdown = report['gating_breakdown_by_minute'][i]
                         if minute_breakdown:
                             for reason, count in sorted(minute_breakdown.items(), key=lambda x: x[1], reverse=True):
-                                fp.write(f"| {minute_key} | {reason} | {count} |\n")
+                                fp.write(f"| {human_readable} | {minute_key} | {reason} | {count} |\n")
                         else:
-                            fp.write(f"| {minute_key} | (无) | 0 |\n")
+                            fp.write(f"| {human_readable} | {minute_key} | (无) | 0 |\n")
                 fp.write(f"\n")
         
         if report['warnings']:
@@ -831,6 +1322,87 @@ class Reporter:
             for warning in report['warnings']:
                 fp.write(f"- {warning}\n")
             fp.write(f"\n")
+        
+        # P1: 告警信息
+        if report.get('alerts'):
+            fp.write(f"## 告警\n\n")
+            for alert in report['alerts']:
+                level = alert.get('level', 'unknown').upper()
+                message = alert.get('message', '')
+                fp.write(f"- **{level}**: {message}\n")
+            fp.write(f"\n")
+        
+        # P1: 运行态（StrategyMode 快照汇总）
+        if report.get('runtime_state'):
+            runtime_state = report['runtime_state']
+            fp.write(f"## 运行态（StrategyMode 快照汇总）\n\n")
+            
+            summary = runtime_state.get('summary', {})
+            if summary:
+                fp.write(f"### 汇总统计\n\n")
+                fp.write(f"- **快照总数**: {summary.get('total_snapshots', 0)}\n")
+                fp.write(f"- **交易对**: {', '.join(summary.get('symbols', []))}\n")
+                fp.write(f"- **平均 TPS**: {summary.get('avg_trades_per_min', 0):.1f} trades/min\n")
+                fp.write(f"- **平均 Quotes/sec**: {summary.get('avg_quotes_per_sec', 0):.1f}\n")
+                fp.write(f"- **平均 Spread**: {summary.get('avg_spread_bps', 0):.2f} bps\n")
+                fp.write(f"- **TPS 范围**: {summary.get('min_trades_per_min', 0):.1f} - {summary.get('max_trades_per_min', 0):.1f} trades/min\n")
+                fp.write(f"- **Spread 范围**: {summary.get('min_spread_bps', 0):.2f} - {summary.get('max_spread_bps', 0):.2f} bps\n")
+                fp.write(f"\n")
+            
+            snapshots = runtime_state.get('snapshots', [])
+            if snapshots:
+                fp.write(f"### 最近快照（最多 20 个）\n\n")
+                fp.write(f"| 时间 | 交易对 | Mode | TPS | Quotes/sec | Spread (bps) | Volatility (bps) | Volume (USD) |\n")
+                fp.write(f"|------|--------|------|-----|------------|---------------|------------------|--------------|\n")
+                for snapshot in snapshots[:20]:
+                    ts_ms = snapshot.get('ts_ms', 0)
+                    symbol = snapshot.get('symbol', 'UNKNOWN')
+                    mode = snapshot.get('mode', 'unknown')
+                    trades_per_min = snapshot.get('trades_per_min', 0)
+                    quotes_per_sec = snapshot.get('quotes_per_sec', 0)
+                    spread_bps = snapshot.get('spread_bps', 0)
+                    volatility_bps = snapshot.get('volatility_bps', 0)
+                    volume_usd = snapshot.get('volume_usd', 0)
+                    
+                    # 格式化时间
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromtimestamp(ts_ms / 1000, tz=self.tz)
+                        time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        time_str = str(ts_ms)
+                    
+                    fp.write(f"| {time_str} | {symbol} | {mode} | {trades_per_min:.1f} | {quotes_per_sec:.1f} | {spread_bps:.2f} | {volatility_bps:.2f} | {volume_usd:.0f} |\n")
+                fp.write(f"\n")
+        
+        # P1: 事件→信号联动表
+        if report.get('event_signal_linkage'):
+            linkage_data = report['event_signal_linkage']
+            events = linkage_data.get('events', {})
+            linkage = linkage_data.get('linkage', {})
+            
+            if events and any(events.values()):
+                fp.write(f"## 事件→信号联动分析\n\n")
+                
+                fp.write(f"### 事件统计\n\n")
+                fp.write(f"| 事件类型 | 计数 |\n")
+                fp.write(f"|---------|------|\n")
+                for event_type, count in sorted(events.items(), key=lambda x: x[1], reverse=True):
+                    if count > 0:
+                        fp.write(f"| {event_type} | {count} |\n")
+                fp.write(f"\n")
+                
+                if linkage:
+                    fp.write(f"### 事件→信号确认率联动\n\n")
+                    fp.write(f"| 事件类型 | 事件计数 | 预估影响比例 |\n")
+                    fp.write(f"|---------|---------|-------------|\n")
+                    for event_type, link_info in linkage.items():
+                        event_count = link_info.get('event_count', 0)
+                        impact_ratio = link_info.get('estimated_impact_ratio', 0.0)
+                        fp.write(f"| {event_type} | {event_count} | {impact_ratio:.2%} |\n")
+                    fp.write(f"\n")
+                
+                fp.write(f"**说明**: 事件计数来自 Harvester 日志，事件→信号确认率的关联分析需要根据时间窗口和事件位置进行精确匹配。\n\n")
 
 
 def validate_config(config: Dict) -> List[str]:
@@ -849,6 +1421,69 @@ def validate_config(config: Dict) -> List[str]:
                     value = consistency_min_per_regime[regime]
                     if not isinstance(value, (int, float)) or value < 0 or value > 1:
                         warnings.append(f"signal.consistency_min_per_regime.{regime} 应为 0-1 之间的数值，当前值: {value}")
+    
+    # P1: 校验阈值单调性：|strong_buy| ≥ |buy|、|strong_sell| ≥ |sell|
+    thresholds_cfg = signal_cfg.get("thresholds", {})
+    if thresholds_cfg:
+        for regime in ["base", "active", "normal", "quiet"]:
+            regime_thresholds = thresholds_cfg.get(regime, {})
+            if regime_thresholds:
+                buy = regime_thresholds.get("buy")
+                strong_buy = regime_thresholds.get("strong_buy")
+                sell = regime_thresholds.get("sell")
+                strong_sell = regime_thresholds.get("strong_sell")
+                
+                # 校验 strong_buy >= buy（绝对值）
+                if buy is not None and strong_buy is not None:
+                    if abs(strong_buy) < abs(buy):
+                        warnings.append(f"signal.thresholds.{regime}: |strong_buy| ({abs(strong_buy)}) < |buy| ({abs(buy)})，违反单调性")
+                
+                # 校验 |strong_sell| >= |sell|
+                if sell is not None and strong_sell is not None:
+                    if abs(strong_sell) < abs(sell):
+                        warnings.append(f"signal.thresholds.{regime}: |strong_sell| ({abs(strong_sell)}) < |sell| ({abs(sell)})，违反单调性")
+    
+    # P1: 校验 sink 合法性与互斥项（例如 SQLite 需要可写目录）
+    sink_cfg = config.get("sink", {})
+    if sink_cfg:
+        sink_kind = sink_cfg.get("kind", "jsonl")
+        output_dir = sink_cfg.get("output_dir", "./runtime")
+        
+        if sink_kind == "sqlite":
+            # SQLite 需要可写目录
+            try:
+                output_path = Path(output_dir)
+                if output_path.exists() and not output_path.is_dir():
+                    warnings.append(f"sink.output_dir 应为目录路径，当前值: {output_dir}")
+                elif not output_path.exists():
+                    # 尝试创建目录以验证权限
+                    try:
+                        output_path.mkdir(parents=True, exist_ok=True)
+                    except PermissionError:
+                        warnings.append(f"sink.output_dir 目录不可写: {output_dir}")
+            except Exception as e:
+                warnings.append(f"sink.output_dir 路径无效: {output_dir}, 错误: {e}")
+    
+    # P1: 校验批量参数边界（用于异步 SQLite Sink）
+    # 注意：这些参数可能通过环境变量设置，这里只校验配置文件中显式设置的
+    sqlite_batch_n = os.getenv("SQLITE_BATCH_N")
+    sqlite_flush_ms = os.getenv("SQLITE_FLUSH_MS")
+    
+    if sqlite_batch_n:
+        try:
+            batch_n = int(sqlite_batch_n)
+            if batch_n <= 0:
+                warnings.append(f"环境变量 SQLITE_BATCH_N 应为正整数，当前值: {batch_n}")
+        except ValueError:
+            warnings.append(f"环境变量 SQLITE_BATCH_N 应为整数，当前值: {sqlite_batch_n}")
+    
+    if sqlite_flush_ms:
+        try:
+            flush_ms = int(sqlite_flush_ms)
+            if flush_ms < 50 or flush_ms > 5000:
+                warnings.append(f"环境变量 SQLITE_FLUSH_MS 应在 [50, 5000] 范围内，当前值: {flush_ms}")
+        except ValueError:
+            warnings.append(f"环境变量 SQLITE_FLUSH_MS 应为整数，当前值: {sqlite_flush_ms}")
     
     # 校验 strategy_mode.triggers
     strategy_mode_cfg = config.get("strategy_mode", {})
@@ -903,11 +1538,15 @@ def build_process_specs(
         cmd=["mcp.harvest_server.app", "--config", str(config_path)],
         env={},
         ready_probe="log_keyword",
-        ready_probe_args={"keywords": ["event\": \"harvest.start", "成功导入所有核心组件"]},  # 检查启动日志
+        ready_probe_args={"keywords": ["harvest.start", "已加载配置文件", "最终使用的交易对数量"]},  # 检查启动日志（支持 JSON 和文本格式）
         health_probe="file_count",
         health_probe_args={
             "pattern": "deploy/data/ofi_cvd/raw/**/*.jsonl",
-            "min_count": 1
+            "min_count": 1,
+            # P0: 健康检查在 smoke/回放场景放宽时间窗口要求
+            # 如果使用历史数据或回放模式，不要求文件在最近120秒内修改
+            "min_new_last_seconds": 0 if os.getenv("V13_REPLAY_MODE", "0") == "1" or config_path.name.startswith("smoke") else None,
+            "min_new_count": 0 if os.getenv("V13_REPLAY_MODE", "0") == "1" or config_path.name.startswith("smoke") else 1
         },
         restart_policy="on_failure",
         max_restarts=2
@@ -932,11 +1571,30 @@ def build_process_specs(
     
     logger.info(f"[signal.input] mode={input_mode} dir={features_dir}")
     
-    signal_cmd = ["mcp.signal_server.app", "--config", str(config_path), "--input", str(features_dir), "--watch", "--sink", sink_kind, "--out", str(output_dir)]
+    # P0: 回放场景移除 --watch，改为批处理模式（跑到数据耗尽）
+    # 根因：SQLite 落库比 JSONL 写文件慢，在相同时长内处理的条目数不同
+    # 回放场景应处理完固定文件集后退出，而不是持续拉流
+    # P0: 健康/就绪探针基线分环境配置
+    # 实时场景：保持现有时间窗口检查
+    # SMOKE/回放场景：min_new_last_seconds=0（历史数据友好化）
+    is_replay_mode = os.getenv("V13_REPLAY_MODE", "0") == "1" or config_path.name.startswith("replay")
+    
+    # P0: 支持双 Sink 模式（dual = jsonl + sqlite）
+    actual_sink_kind = sink_kind
+    if sink_kind == "dual":
+        actual_sink_kind = "dual"  # signal_server 需要支持 dual
+    signal_cmd = ["mcp.signal_server.app", "--config", str(config_path), "--input", str(features_dir), "--sink", actual_sink_kind, "--out", str(output_dir)]
+    if not is_replay_mode:
+        # 实时场景：使用 --watch 持续监控新文件
+        signal_cmd.insert(-2, "--watch")
     if symbols:
         signal_cmd.extend(["--symbols"] + symbols)
     
-    signal_ready_probe = "file_exists" if sink_kind == "jsonl" else "sqlite_connect"
+    # P0: 双 Sink 模式下，检查 JSONL 文件存在（SQLite 连接检查在健康探针中）
+    if sink_kind == "dual":
+        signal_ready_probe = "file_exists"  # 优先检查 JSONL（更快）
+    else:
+        signal_ready_probe = "file_exists" if sink_kind == "jsonl" else "sqlite_connect"
     # 使用相对路径（相对于 project_root）
     try:
         if output_dir.is_absolute():
@@ -947,25 +1605,44 @@ def build_process_specs(
         # 如果无法计算相对路径，使用绝对路径（会在探针中处理）
         output_dir_rel = output_dir
     
-    signal_ready_args = (
-        {"pattern": str(output_dir_rel / "ready" / "signal" / "**" / "*.jsonl")} if sink_kind == "jsonl"
-        else {"db_path": str(output_dir_rel / "signals.db")}
-    )
+    # P0: 双 Sink 模式下，就绪探针检查 JSONL 文件
+    if sink_kind == "dual":
+        signal_ready_args = {"pattern": str(output_dir_rel / "ready" / "signal" / "**" / "*.jsonl")}
+    elif sink_kind == "jsonl":
+        signal_ready_args = {"pattern": str(output_dir_rel / "ready" / "signal" / "**" / "*.jsonl")}
+    else:
+        signal_ready_args = {"db_path": str(output_dir_rel / "signals.db")}
     
-    signal_health_args = (
-        {
+    # P0: 健康/就绪探针基线分环境配置
+    # 实时场景：保持现有时间窗口检查
+    # SMOKE/回放场景：min_new_last_seconds=0（历史数据友好化）
+    is_replay_mode = os.getenv("V13_REPLAY_MODE", "0") == "1" or config_path.name.startswith("replay")
+    min_new_last_seconds = 0 if is_replay_mode else 120
+    
+    # P0: 双 Sink 模式下，健康探针使用 file_count（JSONL）
+    if sink_kind == "dual":
+        signal_health_args = {
             "pattern": str(output_dir_rel / "ready" / "signal" / "**" / "*.jsonl"),
             "min_count": 1,
-            "min_new_last_seconds": 120,  # 最近120秒内
+            "min_new_last_seconds": min_new_last_seconds,  # P0: 回放场景设为 0
             "min_new_count": 1,  # 至少1个新文件
-            "max_idle_seconds": 60  # 最近60秒内必须有文件更新
-        } if sink_kind == "jsonl"
-        else {
-            "db_path": str(output_dir_rel / "signals.db"),
-            "min_growth_window_seconds": 120,  # 最近2分钟
-            "min_growth_count": 1  # 至少1行增长
+            "max_idle_seconds": 60 if not is_replay_mode else None  # P0: 回放场景不检查最大空闲时间
         }
-    )
+    elif sink_kind == "jsonl":
+        signal_health_args = {
+            "pattern": str(output_dir_rel / "ready" / "signal" / "**" / "*.jsonl"),
+            "min_count": 1,
+            "min_new_last_seconds": min_new_last_seconds,  # P0: 回放场景设为 0
+            "min_new_count": 1,  # 至少1个新文件
+            "max_idle_seconds": 60 if not is_replay_mode else None  # P0: 回放场景不检查最大空闲时间
+        }
+    else:
+        signal_health_args = {
+            "db_path": str(output_dir_rel / "signals.db"),
+            # 修复：SQLite 健康探针在回放场景放宽或禁用增长校验
+            "min_growth_window_seconds": None if is_replay_mode else 120,  # 回放场景禁用增长校验
+            "min_growth_count": 0 if is_replay_mode else 1  # 回放场景不要求增长
+        }
     
     signal_spec = ProcessSpec(
         name="signal",
@@ -973,7 +1650,8 @@ def build_process_specs(
         env=signal_env,
         ready_probe=signal_ready_probe,
         ready_probe_args=signal_ready_args,
-        health_probe="file_count" if sink_kind == "jsonl" else "sqlite_query",
+        # P0: 双 Sink 模式下，使用 file_count 健康探针（JSONL）
+        health_probe="file_count" if sink_kind in ("jsonl", "dual") else "sqlite_query",
         health_probe_args=signal_health_args,
         restart_policy="on_failure",
         max_restarts=2
@@ -982,9 +1660,11 @@ def build_process_specs(
     
     # Broker Gateway Server (Mock)
     broker_output_path = output_dir_rel / "mock_orders.jsonl"
+    # P0: Broker 参数外露：抽样率
+    broker_sample_rate = os.getenv("BROKER_SAMPLE_RATE", "0.2")
     broker_spec = ProcessSpec(
         name="broker",
-        cmd=["mcp.broker_gateway_server.app", "--mock", "1", "--output", str(broker_output_path), "--seed", "42"],
+        cmd=["mcp.broker_gateway_server.app", "--mock", "1", "--output", str(broker_output_path), "--seed", "42", "--sample_rate", broker_sample_rate],
         env={"PAPER_ENABLE": "1"},
         ready_probe="log_keyword",
         ready_probe_args={"keyword": "Mock Broker started"},
@@ -1085,21 +1765,108 @@ async def main_async(args):
                 output_dir=log_dir / "report"
             )
             report = reporter.generate_report(sink_kind, output_dir)
+            
+            # P1: 汇总 StrategyMode 快照到 runtime_state
+            reporter._collect_runtime_state(report, supervisor)
+            
+            # P1: 收集事件→信号联动数据
+            reporter._collect_event_signal_linkage(report, supervisor)
+            
+            # P1: 检查告警规则
+            alerts = reporter._check_alerts(report)
+            if alerts:
+                logger.warning(f"[alerts] 检测到 {len(alerts)} 个告警:")
+                for alert in alerts:
+                    logger.warning(f"[alerts] {alert['level'].upper()}: {alert['message']}")
+                report["alerts"] = alerts
+            
             reporter.save_report(report, format="both")
             
             # 保存运行清单
             ended_at = datetime.utcnow()
             duration_s = (ended_at - started_at).total_seconds()
+            
+            # P1: run_manifest 增强可追溯性
+            git_head = None
+            git_dirty = False
+            config_sha1 = None
+            features_manifest = None
+            env_overrides = {}
+            
+            try:
+                import subprocess
+                import hashlib
+                
+                # Git 信息
+                git_head = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=project_root,
+                    stderr=subprocess.DEVNULL
+                ).decode("utf-8").strip()
+                git_status = subprocess.check_output(
+                    ["git", "status", "--porcelain"],
+                    cwd=project_root,
+                    stderr=subprocess.DEVNULL
+                ).decode("utf-8").strip()
+                git_dirty = bool(git_status)
+                
+                # P1: config_sha1（配置文件内容 hash）
+                if config_path.exists():
+                    with config_path.open("rb") as fp:
+                        config_content = fp.read()
+                        config_sha1 = hashlib.sha1(config_content).hexdigest()
+                
+                # P1: features_manifest（输入目录/文件指纹摘要）
+                input_mode = os.getenv("V13_INPUT_MODE", "preview")
+                input_dir_env = os.getenv("V13_INPUT_DIR", "")
+                if input_dir_env:
+                    features_dir = Path(input_dir_env)
+                else:
+                    features_dir = project_root / "deploy" / "data" / "ofi_cvd" / input_mode
+                
+                if features_dir.exists():
+                    # 收集 Parquet 和 JSONL 文件的前几个作为指纹
+                    parquet_files = sorted(features_dir.rglob("*.parquet"))[:5]
+                    jsonl_files = sorted(features_dir.rglob("*.jsonl"))[:5]
+                    features_manifest = {
+                        "input_dir": str(features_dir),
+                        "input_mode": input_mode,
+                        "sample_files": {
+                            "parquet": [str(f.name) for f in parquet_files],
+                            "jsonl": [str(f.name) for f in jsonl_files]
+                        }
+                    }
+                
+                # P1: env_overrides（关键 env 的最终值）
+                env_overrides = {
+                    "V13_INPUT_MODE": os.getenv("V13_INPUT_MODE", "preview"),
+                    "V13_REPLAY_MODE": os.getenv("V13_REPLAY_MODE", "0"),
+                    "V13_SINK": os.getenv("V13_SINK", sink_kind),
+                    "REPORT_TZ": os.getenv("REPORT_TZ", "UTC"),
+                    "BROKER_SAMPLE_RATE": os.getenv("BROKER_SAMPLE_RATE", "0.2")
+                }
+            except Exception as e:
+                logger.warning(f"获取版本指纹失败: {e}")
+            
             manifest = {
                 "run_id": ended_at.strftime("%Y%m%d_%H%M%S"),
                 "started_at": started_at.isoformat(),
                 "ended_at": ended_at.isoformat(),
                 "duration_s": duration_s,
                 "config": str(config_path),
+                "config_sha1": config_sha1,  # P1: 配置文件内容 hash
                 "sink": sink_kind,
                 "enabled_modules": list(enabled_modules),
                 "status": supervisor.get_status(),
-                "report": report
+                "report": report,
+                "source_versions": {
+                    "git_head": git_head,
+                    "git_dirty": git_dirty,
+                    "python_version": sys.version.split()[0],
+                    "config_sha1": config_sha1,  # P1: 配置文件内容 hash
+                    "features_manifest": features_manifest,  # P1: 输入目录/文件指纹摘要
+                    "env_overrides": env_overrides  # P1: 关键 env 的最终值
+                }
             }
             manifest_path = artifacts_dir / "run_logs" / f"run_manifest_{manifest['run_id']}.json"
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1150,9 +1917,9 @@ def parse_args():
     parser.add_argument(
         "--sink",
         type=str,
-        choices=["jsonl", "sqlite"],
+        choices=["jsonl", "sqlite", "dual"],
         default="jsonl",
-        help="信号输出格式（jsonl/sqlite，默认: jsonl）"
+        help="信号输出格式（jsonl/sqlite/dual，dual=同时写入jsonl+sqlite，默认: jsonl）"
     )
     
     parser.add_argument(

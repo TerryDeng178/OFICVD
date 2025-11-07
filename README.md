@@ -1,6 +1,6 @@
 # OFI+CVD 交易系统 · 主开发文档（Cursor 友好版 · V4.1）
-> 更新日期：2025-11-07 (Asia/Tokyo)  
-> 最后同步：TASK-06 已签收（StrategyMode 集成完成，Active 占比 99.998%）
+> 更新日期：2025-11-08 (Asia/Tokyo)  
+> 最后同步：TASK-07 已签收（Orchestrator 编排与端到端冒烟完成，功能验证完成度 83%）
 
 本版（V4.1）在 V4 基础上进行**增量更新**：
 - **HARVEST**：实时行情/成交/订单簿采集与落库（统一 Row Schema + 分片轮转 + 出站 DQ 闸门）。
@@ -228,7 +228,11 @@ flowchart LR
 }
 ```
 
-> 统一以 **JSON Lines**（一行一条）落地，便于回放与离线分析。
+> **重要约定（DoD）**: 信号→订单链路的一致口径
+> - **Reporter 统计**: 仅统计 `confirm=true` 的信号（`total`, `buy_count`, `sell_count`, `strong_ratio` 等）
+> - **Broker 下单**: 仅处理 `confirm=true` 的信号（强信号必下单，普通信号按 `sample_rate` 抽样）
+> - **统计口径一致性**: JSONL 和 SQLite 两种 Sink 的统计口径完全一致，确保可对比性
+> - 统一以 **JSON Lines**（一行一条）落地，便于回放与离线分析。
 
 ---
 
@@ -463,10 +467,42 @@ python -m mcp.signal_server.app \
 
 **M3 · 主控编排（Orchestrator）**
 ```bash
+# 基本用法（Windows PowerShell）:
+python -m orchestrator.run `
+  --config ./config/defaults.yaml `
+  --enable harvest,signal,broker,report `
+  --sink jsonl `
+  --minutes 3
+
+# 双 Sink 模式（同时写入 JSONL 和 SQLite）:
+python -m orchestrator.run `
+  --config ./config/defaults.yaml `
+  --enable harvest,signal,broker,report `
+  --sink dual `
+  --minutes 3
+
+# SQLite 模式:
+python -m orchestrator.run `
+  --config ./config/defaults.yaml `
+  --enable harvest,signal,broker,report `
+  --sink sqlite `
+  --minutes 3
+
+# Linux/macOS:
 python -m orchestrator.run \
   --config ./config/defaults.yaml \
-  --enable harvest,signal,broker,report
+  --enable harvest,signal,broker,report \
+  --sink jsonl \
+  --minutes 3
 ```
+
+**Orchestrator 说明**:
+- **功能**: 统一编排 HARVEST → SIGNAL → BROKER → REPORT 流程
+- **Sink 支持**: `jsonl`、`sqlite`、`dual`（双 Sink 并行写入）
+- **健康检查**: 每 10 秒检查一次，支持 LIVE/replay 模式区分
+- **优雅重启**: 支持故障注入测试，进程被 kill 后自动重启（12 秒内）
+- **日报生成**: 自动生成 JSON + Markdown 格式日报，包含 Runtime State、事件→信号联动、告警信息
+- **详细文档**: `reports/v4.0.6-总体执行报告.md`
 
 ---
 
@@ -483,7 +519,7 @@ python -m orchestrator.run \
 **M2 · 信号与风控**：
 - ✅ **TASK-05** - CORE_ALGO 信号服务（Sink: JSONL/SQLite）
 - ✅ **TASK-06** - StrategyMode & 风控护栏（spread/lag/activity 等）**（已签收，2025-11-07）**
-- **TASK-07** - Orchestrator 编排与端到端冒烟
+- ✅ **TASK-07** - Orchestrator 编排与端到端冒烟**（已签收，2025-11-08）**
 
 **M3 · 编排、回测与复盘**：
 - **TASK-08** - 回放/回测 Harness（JSONL/Parquet → 信号 → PnL）

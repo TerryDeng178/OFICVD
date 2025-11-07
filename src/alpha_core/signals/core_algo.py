@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,10 +114,14 @@ class NullSink(SignalSink):
 class JsonlSink(SignalSink):
     """Append-only JSONL sink matching TASK-05 contract."""
 
-    def __init__(self, base_dir: Path) -> None:
+    def __init__(self, base_dir: Path, fsync_every_n: int = 50) -> None:
         self.base_dir = Path(base_dir)
         self.ready_root = self.base_dir / "ready" / "signal"
         self.ready_root.mkdir(parents=True, exist_ok=True)
+        # P0: JSONL Writer 的 fsync 频率改为可配置
+        # 引入 FSYNC_EVERY_N 环境变量（默认 50），在后台线程场景下按批次 fsync
+        self.fsync_every_n = int(os.getenv("FSYNC_EVERY_N", str(fsync_every_n)))
+        self._write_count = 0
 
     def emit(self, entry: Dict[str, Any]) -> None:
         ts_ms = int(entry["ts_ms"])
@@ -125,23 +132,38 @@ class JsonlSink(SignalSink):
         target_dir.mkdir(parents=True, exist_ok=True)
         target_file = target_dir / f"signals_{minute}.jsonl"
         serialized = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+        
+        # P0: 按批次 fsync，兼顾数据安全与性能
         with target_file.open("a", encoding="utf-8") as fp:
             fp.write(serialized + "\n")
+            self._write_count += 1
+            # 每 N 次写入执行一次 fsync
+            if self._write_count >= self.fsync_every_n:
+                fp.flush()
+                os.fsync(fp.fileno())
+                self._write_count = 0
+            else:
+                # 仍然 flush，但不 fsync（减少系统调用）
+                fp.flush()
 
     def get_health(self) -> Dict[str, Any]:
         return {"kind": "jsonl", "base_dir": str(self.base_dir)}
 
 
 class SqliteSink(SignalSink):
-    """SQLite sink (WAL) with schema aligned to TASK-05."""
+    """SQLite sink (WAL) with async batch processing for better throughput."""
 
-    def __init__(self, base_dir: Path) -> None:
+    def __init__(self, base_dir: Path, batch_n: int = 500, flush_ms: int = 500) -> None:
         base_dir = Path(base_dir)
         base_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = base_dir / "signals.db"
         self.conn = sqlite3.connect(self.db_path)
+        # P1: SQLite 性能优化，减少"吞吐差"
+        # 启用 WAL 模式、降低同步级别、使用内存临时存储、增大缓存
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
+        self.conn.execute("PRAGMA temp_store=MEMORY;")
+        self.conn.execute("PRAGMA cache_size=-20000;")  # 约 80MB
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS signals (
@@ -165,6 +187,14 @@ class SqliteSink(SignalSink):
             "CREATE INDEX IF NOT EXISTS idx_signals_symbol_ts ON signals(symbol, ts_ms);"
         )
         self.conn.commit()
+        
+        # P0: 统一并默认启用"异步批量 SQLite Sink"
+        # 队列+批量 executemany，显著缩小 JSONL vs SQLite 的吞吐差
+        self.batch_n = int(os.getenv("SQLITE_BATCH_N", str(batch_n)))
+        self.flush_ms = int(os.getenv("SQLITE_FLUSH_MS", str(flush_ms)))
+        self._batch_queue: List[tuple] = []
+        self._last_flush_time = time.time()
+        self._lock = threading.Lock()
 
     def emit(self, entry: Dict[str, Any]) -> None:
         payload = (
@@ -180,20 +210,69 @@ class SqliteSink(SignalSink):
             1 if entry.get("gating") else 0,
             entry.get("guard_reason"),
         )
-        self.conn.execute(
-            "INSERT OR REPLACE INTO signals (ts_ms, symbol, score, z_ofi, z_cvd, regime, div_type, signal_type, confirm, gating, guard_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?);",
-            payload,
-        )
-        self.conn.commit()
+        
+        # P0: 批量处理模式
+        with self._lock:
+            self._batch_queue.append(payload)
+            current_time = time.time()
+            should_flush = (
+                len(self._batch_queue) >= self.batch_n or
+                (current_time - self._last_flush_time) * 1000 >= self.flush_ms
+            )
+            
+            if should_flush:
+                self._flush_batch()
+    
+    def _flush_batch(self) -> None:
+        """批量写入数据库"""
+        if not self._batch_queue:
+            return
+        
+        try:
+            # 使用 executemany 批量插入
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO signals (ts_ms, symbol, score, z_ofi, z_cvd, regime, div_type, signal_type, confirm, gating, guard_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?);",
+                self._batch_queue,
+            )
+            self.conn.commit()
+            self._batch_queue.clear()
+            self._last_flush_time = time.time()
+        except Exception as e:
+            logger.error(f"SQLite batch flush failed: {e}")
+            # 失败时清空队列，避免数据堆积
+            self._batch_queue.clear()
+    
+    def close(self) -> None:
+        """关闭时刷新剩余批次"""
+        with self._lock:
+            if self._batch_queue:
+                self._flush_batch()
+        if self.conn:
+            self.conn.close()
 
     def get_health(self) -> Dict[str, Any]:
         return {"kind": "sqlite", "path": str(self.db_path)}
 
+
+class MultiSink(SignalSink):
+    """同时写入多个 Sink（用于双 Sink 等价性测试）"""
+    
+    def __init__(self, sinks: List[SignalSink]) -> None:
+        self.sinks = sinks
+    
+    def emit(self, entry: Dict[str, Any]) -> None:
+        for sink in self.sinks:
+            sink.emit(entry)
+    
     def close(self) -> None:
-        try:
-            self.conn.close()
-        except Exception:  # pragma: no cover - defensive
-            logger.exception("failed to close sqlite connection")
+        for sink in self.sinks:
+            sink.close()
+    
+    def get_health(self) -> Dict[str, Any]:
+        return {
+            "kind": "multi",
+            "sinks": [sink.get_health() for sink in self.sinks]
+        }
 
 
 def build_sink(kind: str, output_dir: Path) -> SignalSink:
@@ -202,6 +281,9 @@ def build_sink(kind: str, output_dir: Path) -> SignalSink:
         return SqliteSink(output_dir)
     if kind == "null":
         return NullSink()
+    if kind == "dual":
+        # P0: 双 Sink 模式（同时写入 JSONL 和 SQLite）
+        return MultiSink([JsonlSink(output_dir), SqliteSink(output_dir)])
     return JsonlSink(output_dir)
 
 
@@ -301,9 +383,13 @@ class CoreAlgorithm:
         self._stats.processed += 1
 
         score = self._resolve_score(row)
-        consistency = float(row.get("consistency", 0.0) or 0.0)
-        spread_bps = float(row.get("spread_bps", 0.0) or 0.0)
-        lag_sec = float(row.get("lag_sec", 0.0) or 0.0)
+        # 处理 None 值（Parquet 文件可能包含 None）
+        consistency_val = row.get("consistency")
+        spread_bps_val = row.get("spread_bps")
+        lag_sec_val = row.get("lag_sec")
+        consistency = float(consistency_val if consistency_val is not None else 0.0)
+        spread_bps = float(spread_bps_val if spread_bps_val is not None else 0.0)
+        lag_sec = float(lag_sec_val if lag_sec_val is not None else 0.0)
         warmup = bool(row.get("warmup", False))
         reason_codes = row.get("reason_codes", []) or []
         
@@ -415,8 +501,11 @@ class CoreAlgorithm:
             return float(score)
         w_ofi = self.config["weights"].get("w_ofi", 0.6)
         w_cvd = self.config["weights"].get("w_cvd", 0.4)
-        ofi = float(row.get("z_ofi") or 0.0)
-        cvd = float(row.get("z_cvd") or 0.0)
+        # 处理 None 值（Parquet 文件可能包含 None）
+        z_ofi_val = row.get("z_ofi")
+        z_cvd_val = row.get("z_cvd")
+        ofi = float(z_ofi_val if z_ofi_val is not None else 0.0)
+        cvd = float(z_cvd_val if z_cvd_val is not None else 0.0)
         return w_ofi * ofi + w_cvd * cvd
 
     def _get_strategy_mode_manager(self, symbol: str) -> Optional[StrategyModeManager]:
@@ -490,8 +579,11 @@ class CoreAlgorithm:
             activity.volatility_bps = float(realized_vol)
         else:
             # Fallback: Estimate from z_ofi/z_cvd
-            z_ofi = abs(float(row.get("z_ofi", 0.0)))
-            z_cvd = abs(float(row.get("z_cvd", 0.0)))
+            # 处理 None 值（Parquet 文件可能包含 None）
+            z_ofi_val = row.get("z_ofi")
+            z_cvd_val = row.get("z_cvd")
+            z_ofi = abs(float(z_ofi_val if z_ofi_val is not None else 0.0))
+            z_cvd = abs(float(z_cvd_val if z_cvd_val is not None else 0.0))
             activity.volatility_bps = max(z_ofi, z_cvd) * 3.0 + 1.0  # Minimum 1 bps
         
         # Extract volume_usd

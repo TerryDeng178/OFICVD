@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  sink-parity:
+    name: 双 Sink 结果对齐回归
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+    
+    - name: 双 Sink 结果对齐回归测试
+      shell: bash
+      env:
+        V13_REPLAY_MODE: 1
+        V13_INPUT_MODE: preview
+        REPORT_TZ: Asia/Tokyo
+      run: |
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          powershell -File ./scripts/verify_sink_parity.ps1 -Config ./config/defaults.replay.yaml -Minutes 2
+        else
+          chmod +x ./scripts/verify_sink_parity.sh
+          ./scripts/verify_sink_parity.sh ./config/defaults.replay.yaml 2
+        fi
+    
+    - name: P0: DoD 固化为 CI 断言
+      shell: bash
+      run: |
+        # 检查报表是否生成
+        REPORT_FILE=$(find logs/report -name "summary_*.json" -type f | head -1)
+        if [ -z "$REPORT_FILE" ]; then
+          echo "报表未生成"
+          exit 1
+        fi
+        
+        # 检查 warnings 不包含 NO_INPUT_FILES/QUIET_RUN/ALL_GATED
+        WARNINGS=$(python3 -c "import json, sys; data=json.load(open('$REPORT_FILE')); print(' '.join(data.get('warnings', [])))")
+        if echo "$WARNINGS" | grep -qE "(NO_INPUT_FILES|QUIET_RUN|ALL_GATED)"; then
+          echo "报表包含不允许的警告: $WARNINGS"
+          exit 1
+        fi
+        
+        # 检查 run_manifest 是否生成且 source_versions 字段完整
+        MANIFEST_FILE=$(find deploy/artifacts/ofi_cvd/run_logs -name "run_manifest_*.json" -type f | head -1)
+        if [ -z "$MANIFEST_FILE" ]; then
+          echo "运行清单未生成"
+          exit 1
+        fi
+        
+        python3 <<EOF
+        import json, sys
+        with open("$MANIFEST_FILE", "r") as f:
+          manifest = json.load(f)
+        source_versions = manifest.get("source_versions", {})
+        required_fields = ["git_head", "python_version"]
+        for field in required_fields:
+          if field not in source_versions:
+            print(f"source_versions 缺少必需字段: {field}")
+            sys.exit(1)
+        print("DoD 断言通过")
+        EOF
+    
+    - name: 上传运行清单（发布证据）
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: run-manifests-${{ matrix.os }}-${{ github.run_number }}
+        path: |
+          deploy/artifacts/ofi_cvd/run_logs/*.json
+          logs/report/*.json
+          logs/report/*.md
+          logs/report/parity_diff_*.json
+        retention-days: 30
+
+  smoke-test:
+    name: SMOKE 快速回归
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+    
+    - name: SMOKE 测试（JSONL）
+      env:
+        V13_INPUT_MODE: preview
+        REPORT_TZ: Asia/Tokyo
+      run: |
+        python -m orchestrator.run \
+          --config ./config/defaults.smoke.yaml \
+          --enable signal,report \
+          --sink jsonl \
+          --minutes 1 \
+          --debug
+    
+    - name: 检查报表生成
+      run: |
+        if [ ! -f logs/report/summary_*.json ]; then
+          echo "报表未生成"
+          exit 1
+        fi
+    
+    - name: 上传运行清单（发布证据）
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: smoke-test-manifests-${{ github.run_number }}
+        path: |
+          deploy/artifacts/ofi_cvd/run_logs/*.json
+          logs/report/*.json
+          logs/report/*.md
+          logs/report/parity_diff_*.json
+        retention-days: 30
+

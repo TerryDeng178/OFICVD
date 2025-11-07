@@ -27,14 +27,15 @@ logger = logging.getLogger(__name__)
 class MockBroker:
     """Mock Broker Gateway - 模拟订单执行"""
     
-    def __init__(self, output_file: Path):
+    def __init__(self, output_file: Path, sample_rate: float = 0.2):
         self.output_file = output_file
         self.output_file.parent.mkdir(parents=True, exist_ok=True)
         self.order_count = 0
         self.buy_count = 0
         self.sell_count = 0
+        self.sample_rate = sample_rate  # P0: Broker 抽样率参数
         
-        logger.info(f"Mock Broker initialized, output: {output_file}")
+        logger.info(f"Mock Broker initialized, output: {output_file}, sample_rate: {sample_rate}")
     
     def process_signal(self, signal: Dict) -> Optional[Dict]:
         """处理信号，生成模拟订单"""
@@ -69,13 +70,13 @@ class MockBroker:
             # 无法解析，跳过
             return None
         
-        # 简化逻辑：强信号全部下单，普通信号按 1/5 抽样
+        # P0: Broker 抽样率参数化
         should_order = False
         if strength == "STRONG":
             should_order = True
         else:
-            # 普通信号：1/5 概率下单
-            should_order = (random.randint(1, 5) == 1)
+            # 普通信号：按 sample_rate 概率下单
+            should_order = (random.random() < self.sample_rate)
         
         if not should_order:
             return None
@@ -221,6 +222,13 @@ def parse_args():
         help="随机数种子（默认: 42，用于可复现的抽样）"
     )
     
+    parser.add_argument(
+        "--sample_rate",
+        type=float,
+        default=0.2,
+        help="普通信号抽样率（默认: 0.2，即 1/5 概率下单）"
+    )
+    
     return parser.parse_args()
 
 
@@ -234,15 +242,15 @@ def main():
     
     # 设置随机数种子（用于可复现的抽样）
     random.seed(args.seed)
-    logger.info(f"随机数种子已设置: {args.seed}")
+    logger.info(f"随机数种子已设置: {args.seed}, 抽样率: {args.sample_rate}")
     
     # 确定项目根目录
     project_root = Path(__file__).resolve().parents[2]
     signal_source = project_root / args.signal_dir
     output_file = project_root / args.output
     
-    # 创建 Mock Broker
-    broker = MockBroker(output_file)
+    # P0: 创建 Mock Broker（带抽样率参数）
+    broker = MockBroker(output_file, sample_rate=args.sample_rate)
     
     logger.info("Mock Broker started")
     logger.info(f"  信号源: {signal_source}")
