@@ -34,6 +34,27 @@ system:
   version: "v4.0.0"
   environment: "development"
 
+features:
+  ofi:
+    window_ms: 5000
+    zscore_window: 30000
+    levels: 5
+    weights: [0.4, 0.25, 0.2, 0.1, 0.05]
+    ema_alpha: 0.2
+  cvd:
+    window_ms: 60000
+    z_mode: "delta"   # delta|level
+  fusion:
+    method: "zsum"    # zsum|weighted (预留字段，当前实现未使用，仅使用 w_ofi/w_cvd)
+    w_ofi: 0.6
+    w_cvd: 0.4
+  divergence:
+    lookback_bars: 60
+
+sink:
+  kind: jsonl         # jsonl|sqlite
+  output_dir: ./runtime
+
 components:
   ofi:
     # TODO: 添加 OFI 配置参数
@@ -54,3 +75,37 @@ components:
   strategy:
     # TODO: 添加 STRATEGYMODE 配置参数
     pass
+
+signal:
+  dedupe_ms: 250
+  weak_signal_threshold: 0.2
+  consistency_min: 0.15
+  spread_bps_cap: 20.0
+  lag_cap_sec: 3.0
+  weights:
+    w_ofi: 0.6
+    w_cvd: 0.4
+  activity:
+    active_min_tps: 3.0
+    normal_min_tps: 1.0
+  thresholds:
+    base:
+      buy: 0.6
+      strong_buy: 1.2
+      sell: -0.6
+      strong_sell: -1.2
+    active:
+      buy: 0.5
+      strong_buy: 1.0
+      sell: -0.5
+      strong_sell: -1.0
+    quiet:
+      buy: 0.7
+      strong_buy: 1.4
+      sell: -0.7
+      strong_sell: -1.4
+  sink:
+    kind: jsonl         # jsonl|sqlite|null
+    output_dir: ./runtime
+  replay_mode: 0
+  debug: true

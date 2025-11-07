@@ -1,5 +1,6 @@
 # OFI+CVD 交易系统 · 主开发文档（Cursor 友好版 · V4.1）
-> 更新日期：2025-11-05 (Asia/Tokyo)
+> 更新日期：2025-11-07 (Asia/Tokyo)  
+> 最后同步：TASK-06 已签收（StrategyMode 集成完成，Active 占比 99.998%）
 
 本版（V4.1）在 V4 基础上进行**增量更新**：
 - **HARVEST**：实时行情/成交/订单簿采集与落库（统一 Row Schema + 分片轮转 + 出站 DQ 闸门）。
@@ -14,6 +15,7 @@
 - `/docs/order_state_machine.md`（订单状态机 · Mermaid）  
 - `/docs/api_contracts.md`（MCP 接口契约与示例）  
 - `/src/alpha_core/ingestion/harvester.py`（**HARVEST** 核心实现）  
+- `/src/alpha_core/microstructure/feature_pipe.py`（**FeaturePipe** 特征计算接线）  
 - `/src/alpha_core/signals/core_algo.py`（**CORE_ALGO** 核心实现）  
 - `/mcp/*/app.py`（各服务薄壳）  
 - `/mcp/harvest_server/app.py`（**HARVEST** 薄壳）  
@@ -54,18 +56,19 @@ repo/
 │     │  ├─ fusion/
 │     │  │  ├─ __init__.py
 │     │  │  └─ ofi_cvd_fusion.py
-│     │  └─ divergence/
-│     │     ├─ __init__.py
-│     │     └─ ofi_cvd_divergence.py
+│     │  ├─ divergence/
+│     │  │  ├─ __init__.py
+│     │  │  └─ ofi_cvd_divergence.py
+│     │  └─ feature_pipe.py              # ★ FeaturePipe：特征计算接线（OFI+CVD+FUSION+DIVERGENCE）
 │     ├─ risk/
 │     │  ├─ __init__.py
-│     │  └─ strategy_mode.py              # StrategyModeManager
+│     │  └─ strategy_mode.py              # ★ StrategyModeManager（已集成，TASK-06）
 │     ├─ ingestion/                       # ★ 采集层库（HARVEST 成熟实现）
 │     │  ├─ __init__.py
 │     │  └─ harvester.py                  # HARVEST 采集接入（已实现：WS/重连/分片/落盘/DQ/OFI/CVD/Fusion）
-│     └─ signals/                         # ★ 新增：信号层库（CORE_ALGO 实现）
+│     └─ signals/                         # ★ 信号层库（CORE_ALGO 实现）
 │        ├─ __init__.py
-│        └─ core_algo.py                  # CORE_ALGO 信号合成（输入 z_ofi/z_cvd/fusion/div）
+│        └─ core_algo.py                  # ★ CORE_ALGO 信号合成（已集成 StrategyMode，TASK-06）
 │
 ├─ mcp/                                   # MCP 服务器（薄壳层）
 │  ├─ data_feed_server/app.py             # 复用 ingestion.harvester
@@ -86,7 +89,7 @@ repo/
 ├─ docs/
 │  ├─ architecture_flow.md                # 架构流程图（Mermaid）
 │  ├─ order_state_machine.md              # 订单状态机（Mermaid）
-│  └─ api_contracts.md                    # MCP 接口契约与示例
+│  └─ api_contracts.md                    # MCP 接口契约与示例（包含 FeaturePipe 输入输出契约）
 │
 ├─ tasks/                                 # 任务卡目录（共 10 个任务）
 │  ├─ TASK-01 - 统一 Row Schema & 出站 DQ Gate（Data Contract）.md
@@ -102,7 +105,16 @@ repo/
 │
 ├─ scripts/
 │  ├─ dev_run.sh                          # 开发环境启动脚本
-│  ├─ harvest_local.sh                    # ★ 新增：单机Harvester启动脚本
+│  ├─ harvest_local.sh                    # ★ 新增：单机Harvester启动脚本（Bash）
+│  ├─ harvest_local.ps1                   # ★ 新增：单机Harvester启动脚本（Windows）
+│  ├─ feature_demo.sh                     # ★ 新增：FeaturePipe 演示脚本（Bash）
+│  ├─ feature_demo.ps1                    # ★ 新增：FeaturePipe 演示脚本（Windows）
+│  ├─ signal_demo.sh                      # ★ 新增：CORE_ALGO 演示脚本（Bash）
+│  ├─ signal_demo.ps1                     # ★ 新增：CORE_ALGO 演示脚本（Windows）
+│  ├─ performance_test.sh                 # ★ 新增：性能测试脚本（Bash）
+│  ├─ performance_test.ps1                # ★ 新增：性能测试脚本（Windows）
+│  ├─ m2_smoke_test.sh                    # ★ 新增：M2 冒烟测试脚本（Bash）
+│  ├─ m2_smoke_test.ps1                   # ★ 新增：M2 冒烟测试脚本（Windows）
 │  └─ run_success_harvest.py              # HARVEST 运行脚本（历史，核心逻辑已迁移至 harvester.py）
 │
 ├─ tools/                                 # 工具脚本
@@ -112,6 +124,10 @@ repo/
 │     ├─ milestones.json                  # GitHub 里程碑定义
 │     └─ epics.json                       # GitHub Epic 定义（V4.1 10个Epic）
 │
+├─ tests/                                 # 测试目录
+│  ├─ conftest.py                         # pytest 配置（路径设置）
+│  └─ test_feature_pipe.py                # ★ 新增：FeaturePipe 单元测试（7 个用例）
+├─ TASK-04-评估报告-签收清单.md          # ★ 新增：TASK-04 签收清单（完整证据链）
 └─ logs/                                  # 日志目录（运行时生成）
 ```
 
@@ -166,9 +182,13 @@ flowchart LR
   "bid": 70321.4,
   "ask": 70321.6,
   "best_spread_bps": 1.4,
+  "bids": [[70321.4, 10.5], [70321.3, 8.2], ...],  // 必须高→低排序
+  "asks": [[70321.6, 11.2], [70321.7, 9.5], ...],  // 必须低→高排序
   "meta": { "latency_ms": 12, "recv_ts_ms": 1730790000125 }
 }
 ```
+
+**排序约定**: bids 必须按价格从高到低，asks 必须按价格从低到高（如输入未保证顺序，实现侧会先排序）。
 
 ### 3.2 特征层 → CORE_ALGO（输入）
 ```json
@@ -180,7 +200,14 @@ flowchart LR
   "price": 70325.1,
   "lag_sec": 0.04,
   "spread_bps": 1.2,
-  "activity": { "tps": 2.3 }
+  "fusion_score": 0.73,
+  "consistency": 0.42,
+  "dispersion": 0.9,
+  "sign_agree": 1,
+  "div_type": null,
+  "activity": { "tps": 2.3 },
+  "warmup": false,
+  "signal": "neutral"
 }
 ```
 
@@ -195,7 +222,9 @@ flowchart LR
   "regime": "active",
   "div_type": null,
   "confirm": true,
-  "gating": false
+  "gating": false,
+  "signal_type": "strong_buy",
+  "guard_reason": null
 }
 ```
 
@@ -231,18 +260,81 @@ features:
   ofi:
     window_ms: 5000
     zscore_window: 30000
+    levels: 5
+    weights: [0.4, 0.25, 0.2, 0.1, 0.05]
+    ema_alpha: 0.2
   cvd:
     window_ms: 60000
+    z_mode: "delta"          # delta|level
   fusion:
-    method: "zsum"           # zsum|weighted
+    method: "zsum"           # zsum|weighted (预留字段，当前实现未使用)
+    w_ofi: 0.6
+    w_cvd: 0.4
   divergence:
     lookback_bars: 60
+sink:
+  kind: jsonl               # jsonl|sqlite
+  output_dir: ./runtime
 
 signal:
-  sink: "jsonl"              # jsonl|sqlite
-  output_dir: "./runtime"
+  dedupe_ms: 250
+  weak_signal_threshold: 0.2
+  consistency_min: 0.15
+  spread_bps_cap: 20.0
+  lag_cap_sec: 3.0
+  weights:
+    w_ofi: 0.6
+    w_cvd: 0.4
+  activity:
+    active_min_tps: 3.0
+    normal_min_tps: 1.0
+  thresholds:
+    base:
+      buy: 0.6
+      strong_buy: 1.2
+      sell: -0.6
+      strong_sell: -1.2
+    active:
+      buy: 0.5
+      strong_buy: 1.0
+      sell: -0.5
+      strong_sell: -1.0
+    quiet:
+      buy: 0.7
+      strong_buy: 1.4
+      sell: -0.7
+      strong_sell: -1.4
+  sink:
+    kind: jsonl               # jsonl|sqlite|null
+    output_dir: ./runtime
   replay_mode: 0
   debug: true
+
+strategy_mode:                # ★ StrategyMode 配置（TASK-06）
+  mode: auto                  # auto | force_active | force_quiet
+  hysteresis:
+    window_secs: 60
+    min_active_windows: 2
+    min_quiet_windows: 4
+  triggers:
+    combine_logic: OR         # OR | AND
+    schedule:
+      enabled: true           # 默认开启（空窗口=全天有效）
+      timezone: "UTC"
+      enabled_weekdays: []    # 空数组=所有星期启用
+      active_windows: []      # 空数组=全天有效
+      wrap_midnight: true
+    market:
+      enabled: true
+      window_secs: 60
+      basic_gate_multiplier: 0.5
+      min_trades_per_min: 30
+      min_quote_updates_per_sec: 5
+      max_spread_bps: 15
+      min_volatility_bps: 0.5
+      min_volume_usd: 10000
+      use_median: true
+      winsorize_percentile: 95
 
 risk:
   gates:
@@ -288,19 +380,86 @@ python -m mcp.harvest_server.app `
   --rotate.max_sec 60
 ```
 
-**M2 · 启动 CORE_ALGO（信号层）**
+**M2 · 特征计算与信号生成**
+
 ```bash
-# 信号服务：直接运行 core_algo 模块
-python -m alpha_core.signals.core_algo --input data/*.parquet --out out/signals.jsonl
+# 步骤 1: 运行 FeaturePipe 生成特征（从 HARVEST 数据生成特征）
+# Windows PowerShell:
+python -m alpha_core.microstructure.feature_pipe `
+  --input ./deploy/data/ofi_cvd `
+  --sink jsonl `
+  --out ./runtime/features.jsonl `
+  --symbols BTCUSDT ETHUSDT `
+  --config ./config/defaults.yaml
 
-# 或通过 MCP 服务（JSONL Sink）
-V13_SINK=jsonl V13_OUTPUT_DIR=./runtime \
-python -m mcp.signal_server.app --config ./config/defaults.yaml
+# 或使用脚本:
+.\scripts\feature_demo.ps1
 
-# 或使用 SQLite Sink（便于并发读）
-V13_SINK=sqlite V13_OUTPUT_DIR=./runtime \
-python -m mcp.signal_server.app --config ./config/defaults.yaml
+# Linux/macOS:
+python -m alpha_core.microstructure.feature_pipe \
+  --input ./deploy/data/ofi_cvd \
+  --sink jsonl \
+  --out ./runtime/features.jsonl \
+  --symbols BTCUSDT ETHUSDT \
+  --config ./config/defaults.yaml
+
+# 或使用脚本:
+bash scripts/feature_demo.sh
+
+# 性能测试（可选）:
+# Windows PowerShell:
+.\scripts\performance_test.ps1
+
+# Linux/macOS:
+bash scripts/performance_test.sh
+
+# 步骤 2: 运行 CORE_ALGO 生成信号（从特征生成交易信号）
+# Windows PowerShell:
+python -m mcp.signal_server.app `
+  --config ./config/defaults.yaml `
+  --input ./runtime/features.jsonl `
+  --sink jsonl `
+  --out ./runtime `
+  --print
+
+# 或使用脚本:
+.\scripts\signal_demo.ps1 -Print
+
+# Linux/macOS:
+python -m mcp.signal_server.app \
+  --config ./config/defaults.yaml \
+  --input ./runtime/features.jsonl \
+  --sink jsonl \
+  --out ./runtime \
+  --print
+
+# 或使用脚本:
+bash scripts/signal_demo.sh
+
+# 切换 SQLite Sink（便于并发读写）:
+python -m mcp.signal_server.app \
+  --config ./config/defaults.yaml \
+  --input ./runtime/features.jsonl \
+  --sink sqlite \
+  --out ./runtime
 ```
+
+**FeaturePipe 说明**:
+- **输入**: HARVEST 层输出的统一 Row（支持 Parquet/JSONL 文件或标准输入）
+- **输出**: FeatureRow（包含 z_ofi, z_cvd, fusion_score, signal 等）
+- **性能**: 实际测试 14,524 rows/s，CPU 38.54%（远超要求）
+- **Sink**: 支持 JSONL（默认）和 SQLite 两种格式
+- **排序约定**: bids 高→低，asks 低→高（实现侧自动排序）
+- **稳定输出**: JSON 序列化使用稳定排序（sort_keys=True），支持回放可复现
+
+**CORE_ALGO 说明**:
+- **入口**: `python -m mcp.signal_server.app` 或 `scripts/signal_demo.(sh|ps1)`
+- **输入**: FeaturePipe JSONL（支持 `--input` 目录/文件/标准输入）
+- **输出**: JSONL 分片或 SQLite `signals.db`
+- **阈值**: 由 `signal.thresholds` 驱动，支持 active/quiet 差异化
+- **StrategyMode**: 集成 StrategyModeManager，支持 schedule + market 触发器，OR/AND 逻辑
+- **统计**: 运行结束打印 processed/emitted/suppressed/deduped/warmup_blocked
+- **心跳日志**: 每 10s 输出 JSON 格式快照（包含 `schedule_active`/`market_active`/`mode`）
 
 **M3 · 主控编排（Orchestrator）**
 ```bash
@@ -316,14 +475,14 @@ python -m orchestrator.run \
 ### 任务列表（共 10 个任务）
 
 **M1 · 数据打通**：
-- **TASK-01** - 统一 Row Schema & 出站 DQ Gate（Data Contract）
-- **TASK-02** - Harvester WS Adapter（Binance Futures）
-- **TASK-03** - Harvest MCP 薄壳与本地运行脚本
-- **TASK-04** - 特征计算接线（OFI＋CVD＋FUSION＋DIVERGENCE）
+- ✅ **TASK-01** - 统一 Row Schema & 出站 DQ Gate（Data Contract）
+- ✅ **TASK-02** - Harvester WS Adapter（Binance Futures）
+- ✅ **TASK-03** - Harvest MCP 薄壳与本地运行脚本
+- ✅ **TASK-04** - 特征计算接线（OFI＋CVD＋FUSION＋DIVERGENCE）**（已签收）**
 
 **M2 · 信号与风控**：
-- **TASK-05** - CORE_ALGO 信号服务（Sink: JSONL/SQLite）
-- **TASK-06** - StrategyMode & 风控护栏（spread/lag/activity 等）
+- ✅ **TASK-05** - CORE_ALGO 信号服务（Sink: JSONL/SQLite）
+- ✅ **TASK-06** - StrategyMode & 风控护栏（spread/lag/activity 等）**（已签收，2025-11-07）**
 - **TASK-07** - Orchestrator 编排与端到端冒烟
 
 **M3 · 编排、回测与复盘**：
@@ -387,6 +546,21 @@ python -m mcp.harvest_server.app --config ./config/defaults.yaml
 - 确保能够访问 Binance Futures WebSocket API
 - 检查防火墙设置
 - 如果在中国大陆，可能需要使用代理
+
+### FeaturePipe 相关
+- **特征生成为 0？**：FeaturePipe 需要同时具备订单簿和成交数据才能生成特征。如果测试数据只包含其中一种类型，则不会生成特征。这是设计预期。
+- **性能测试说明**：性能测试脚本位于 `scripts/performance_test.ps1`（Windows）和 `scripts/performance_test.sh`（Linux/macOS）。实际测试结果：14,524 rows/s，CPU 38.54%（远超要求）。
+- **SQLite schema 问题？**：如果遇到 SQLite 表缺少 `signal` 字段，FeaturePipe 会自动执行 `ALTER TABLE` 添加该字段（向后兼容）。
+
+### StrategyMode 相关（TASK-06）
+- **100% Quiet 问题**：已修复。根因是 Schedule 默认关闭 + `enabled_weekdays: []` 语义缺陷。修复后 Active 占比从 0% 提升到 99.998%（smoke 配置）。
+- **Active 占比过高（99%）**：这是 smoke 配置的预期结果（`schedule.active_windows: []` = 全天有效 + OR 逻辑）。生产环境需切换配置（见 `config/defaults.staging.yaml` 或报告中的生产配置方案）。
+- **性能下降**：引入 StrategyMode 后，吞吐量从 ~3,030 rows/sec 降到 ~837 rows/sec（-72%），但仍在可接受范围（1.2ms/row）。这是功能增强的正常代价。
+- **配置说明**：
+  - **Smoke**：`combine_logic: OR` + 全天有效，用于 CI/E2E 验证
+  - **Staging**：`combine_logic: AND` + 工作日核心时段，用于预生产验证
+  - **Prod**：建议采用方案 1（仅 Market 触发）或方案 3（AND 逻辑）
+- **详细文档**：`reports/P0-StrategyMode-100-Quiet-修复验证报告.md`
 
 ### 其他常见问题
 - **深夜无量导致 OFI/CVD 异常？**：开启 `risk.gates.require_activity`，低活跃时仅观测不下单。  

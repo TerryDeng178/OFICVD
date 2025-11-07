@@ -51,6 +51,7 @@ Thumbs.db
 
 # Runtime data directories
 deploy/
+runtime/
 *.ndjson
 *.sidecar.json
 

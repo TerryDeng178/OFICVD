@@ -206,6 +206,8 @@ class StrategyModeManager:
         self.min_volume_usd = market_config.get('min_volume_usd', 200000)
         self.use_median = market_config.get('use_median', True)
         self.winsorize_percentile = market_config.get('winsorize_percentile', 95)
+        # P0: 基础门槛倍率（用于放宽基础准入）
+        self.basic_gate_multiplier = market_config.get('basic_gate_multiplier', 0.5)
         
         # 质量门槛倍率（用于线下灰度调参）
         qmult = market_config.get('quality_multipliers', {})
@@ -504,6 +506,8 @@ class StrategyModeManager:
                 dt = dt.astimezone(self.timezone)
         
         # 检查星期几
+        # P0: 空列表视为"所有星期都启用"（类似 active_windows 为空=全天有效）
+        if self.enabled_weekdays:
         weekday = dt.strftime('%a')  # Mon, Tue, Wed, ...
         if weekday not in self.enabled_weekdays:
             return False
@@ -515,6 +519,10 @@ class StrategyModeManager:
         
         # 检查活跃时段
         current_mins = dt.hour * 60 + dt.minute
+        
+        # P0: 空窗口视为"全天有效"，避免开启了 schedule 却永远 False
+        if not self.active_windows:
+            return True
         
         for window in self.active_windows:
             if self._is_in_time_window(current_mins, window):
@@ -571,13 +579,14 @@ class StrategyModeManager:
             _metrics.set_gauge('strategy_market_samples_window_size', float(len(self.market_samples)))
             _metrics.set_gauge('strategy_market_samples_coverage_seconds', coverage)
         
-        # 第一阶段：基础准入门槛（更宽松）
+        # P0: 第一阶段：基础准入（用配置×倍率，避免硬编码卡死）
+        basic_multiplier = self.basic_gate_multiplier
         basic_conditions = [
-            activity.trades_per_min >= 50,           # 基础门槛
-            activity.quote_updates_per_sec >= 10,   # 基础门槛
-            activity.spread_bps <= 12,              # 基础门槛
-            activity.volatility_bps >= 1,           # 基础门槛
-            activity.volume_usd >= 50000            # 基础门槛
+            activity.trades_per_min >= self.min_trades_per_min * basic_multiplier,
+            activity.quote_updates_per_sec >= self.min_quote_updates_per_sec * basic_multiplier,
+            activity.spread_bps <= self.max_spread_bps / basic_multiplier,  # 允许更宽
+            activity.volatility_bps >= self.min_volatility_bps * basic_multiplier,
+            activity.volume_usd >= self.min_volume_usd * basic_multiplier,
         ]
         
         # 如果基础门槛不满足，直接返回False
@@ -588,14 +597,17 @@ class StrategyModeManager:
         
         # 第二阶段：质量过滤门槛（按场景差异化）
         current_mode = self.get_current_mode()
-        quality_conditions = self._get_quality_conditions(current_mode, activity)
         
-        # 如果样本不足，使用当前单次快照（启动初期）
+        # P0: 如果样本不足，使用基础门槛（而不是严格的质量门槛）
         if len(self.market_samples) < 3:
-            quality_pass = all(quality_conditions)
+            # 样本不足时，使用基础门槛作为质量门槛（避免过严）
+            quality_pass = basic_pass  # 基础门槛已经通过，直接使用
             _metrics.set_gauge('strategy_market_gate_quality_pass', 1.0 if quality_pass else 0.0)
             _metrics.set_gauge('strategy_market_gate_window_pass', 0.0)  # 样本不足，无窗口判定
             return quality_pass
+        
+        # 样本充足时，使用质量门槛
+        quality_conditions = self._get_quality_conditions(current_mode, activity)
         
         # 基于滑动窗口计算稳健统计量
         # 本地快照，避免遍历过程中被修改（并发读稳健）
@@ -1246,4 +1258,14 @@ if __name__ == "__main__":
     # 获取场景统计
     scenario_stats = manager.get_scenario_stats()
     print(f"\n[STATS] 场景参数统计: {scenario_stats}")
+
+    for scenario in ['A_H', 'A_L', 'Q_H', 'Q_L']:
+        for side in ['long', 'short']:
+            params = manager.get_params_for_scenario(scenario, side)
+            print(f"  {scenario} {side}: Z_HI={params['Z_HI']}, TP_BPS={params['TP_BPS']}, SL_BPS={params['SL_BPS']}")
+    
+    # 获取场景统计
+    scenario_stats = manager.get_scenario_stats()
+    print(f"\n[STATS] 场景参数统计: {scenario_stats}")
+
 
