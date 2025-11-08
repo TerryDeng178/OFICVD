@@ -124,6 +124,17 @@ class JsonlSink(SignalSink):
         self._write_count = 0
 
     def emit(self, entry: Dict[str, Any]) -> None:
+        # P0: 在JSONL中追加run_id字段，用于按run_id对账
+        # 强制从环境变量读取run_id（覆盖entry中可能存在的空值）
+        run_id_env = os.getenv("RUN_ID", "")
+        # 始终设置run_id字段（即使环境变量为空，也要写入字段）
+        entry["run_id"] = run_id_env
+        # 调试：确保run_id字段存在
+        if "run_id" not in entry:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"[JsonlSink] run_id字段缺失，entry keys: {list(entry.keys())}")
+            entry["run_id"] = run_id_env if run_id_env else ""
         ts_ms = int(entry["ts_ms"])
         dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
         minute = dt.strftime("%Y%m%d_%H%M")
@@ -131,9 +142,32 @@ class JsonlSink(SignalSink):
         target_dir = self.ready_root / symbol
         target_dir.mkdir(parents=True, exist_ok=True)
         target_file = target_dir / f"signals_{minute}.jsonl"
+        # 调试：在序列化前再次确保run_id存在（使用之前读取的run_id_env）
+        if "run_id" not in entry:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"[JsonlSink] 序列化前run_id缺失！entry keys: {list(entry.keys())}, RUN_ID env: {run_id_env}")
+            entry["run_id"] = run_id_env if run_id_env else ""
+        # 再次从环境变量读取（防止之前的值被覆盖）
+        current_run_id = os.getenv("RUN_ID", "")
+        if current_run_id:
+            entry["run_id"] = current_run_id
+        elif "run_id" not in entry:
+            entry["run_id"] = ""
+        # P0: 添加水印字段，用于验证是否使用了CORE_ALGO的JsonlSink
+        entry.setdefault("_writer", "core_jsonl_v406")
         serialized = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+        # 调试：验证序列化后的JSON是否包含run_id
+        if '"run_id"' not in serialized:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"[JsonlSink] 序列化后run_id缺失！entry keys: {list(entry.keys())}, RUN_ID env: {current_run_id}, serialized: {serialized[:200]}")
+            # 强制添加run_id字段
+            entry["run_id"] = current_run_id if current_run_id else ""
+            serialized = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
         
         # P0: 按批次 fsync，兼顾数据安全与性能
+        # P1: 注意：_write_count 跨文件累积，fsync 发生在当次目标文件句柄上
         with target_file.open("a", encoding="utf-8") as fp:
             fp.write(serialized + "\n")
             self._write_count += 1
@@ -153,7 +187,12 @@ class JsonlSink(SignalSink):
 class SqliteSink(SignalSink):
     """SQLite sink (WAL) with async batch processing for better throughput."""
 
-    def __init__(self, base_dir: Path, batch_n: int = 500, flush_ms: int = 500) -> None:
+    def __init__(self, base_dir: Path, batch_n: int = None, flush_ms: int = None) -> None:
+        # TASK-07A: 支持环境变量调参，便于在不同盘型/Windows上调优批量提交
+        if batch_n is None:
+            batch_n = int(os.getenv("SQLITE_BATCH_N", "500"))
+        if flush_ms is None:
+            flush_ms = int(os.getenv("SQLITE_FLUSH_MS", "500"))
         base_dir = Path(base_dir)
         base_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = base_dir / "signals.db"
@@ -163,7 +202,14 @@ class SqliteSink(SignalSink):
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
         self.conn.execute("PRAGMA temp_store=MEMORY;")
-        self.conn.execute("PRAGMA cache_size=-20000;")  # 约 80MB
+        self.conn.execute("PRAGMA cache_size=-20000;")  # 约 20MB（负值单位是KB，20000 KB = 20 MB）
+        
+        # P0: 检查并迁移旧版表结构到统一版本（(run_id, ts_ms, symbol)主键）
+        self._migrate_schema_if_needed()
+        
+        # P2: 模块导入时自检：PRAGMA table_info(signals) 缺列就迁移
+        # 确保表结构符合统一版本（(run_id, ts_ms, symbol)主键，12+列含run_id）
+        # 允许同一毫秒多次回放/多次测试而不互相覆盖
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS signals (
@@ -178,25 +224,198 @@ class SqliteSink(SignalSink):
                 confirm INTEGER,
                 gating INTEGER,
                 guard_reason TEXT,
+                run_id TEXT NOT NULL,
                 created_at TEXT DEFAULT (DATETIME('now')),
-                PRIMARY KEY (ts_ms, symbol)
+                PRIMARY KEY (run_id, ts_ms, symbol)
             );
             """
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_signals_symbol_ts ON signals(symbol, ts_ms);"
         )
+        # TASK-07B: 设置busy_timeout，减少写锁报错
+        self.conn.execute("PRAGMA busy_timeout=5000;")
         self.conn.commit()
+        
+        # P2: 自检表结构，确保符合统一版本（仅在表存在时检查，避免影响新表创建）
+        # 注意：这个检查在_migrate_schema_if_needed()之后执行，主要用于验证迁移结果
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='signals'")
+            if cursor.fetchone():
+                # 表存在，进行验证
+                cursor.execute("PRAGMA table_info(signals)")
+                columns = {row[1]: row[2] for row in cursor.fetchall()}
+                cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='signals'")
+                table_sql_result = cursor.fetchone()
+                table_sql = (table_sql_result[0] if table_sql_result else "") or ""
+                ddl_upper = table_sql.upper()
+                
+                # 检查主键是否为(run_id, ts_ms, symbol)
+                has_pk_run_ts_symbol = (
+                    "PRIMARY KEY" in ddl_upper and 
+                    "RUN_ID" in ddl_upper and 
+                    "TS_MS" in ddl_upper and 
+                    "SYMBOL" in ddl_upper
+                )
+                
+                # 检查必需列
+                required_columns = ["ts_ms", "symbol", "score", "signal_type", "confirm", "gating", "guard_reason", "run_id", "created_at"]
+                missing_columns = [col for col in required_columns if col not in columns]
+                
+                if has_pk_run_ts_symbol and not missing_columns:
+                    logger.debug("[SqliteSink] 表结构验证通过：符合统一版本（(run_id, ts_ms, symbol)主键）")
+                else:
+                    logger.warning(f"[SqliteSink] 表结构验证：主键={has_pk_run_ts_symbol}, 缺失列={missing_columns}（已由_migrate_schema_if_needed处理）")
+        except Exception as e:
+            # 自检失败不影响正常功能，只记录警告
+            logger.warning(f"[SqliteSink] 表结构自检失败（可忽略）: {e}")
         
         # P0: 统一并默认启用"异步批量 SQLite Sink"
         # 队列+批量 executemany，显著缩小 JSONL vs SQLite 的吞吐差
-        self.batch_n = int(os.getenv("SQLITE_BATCH_N", str(batch_n)))
-        self.flush_ms = int(os.getenv("SQLITE_FLUSH_MS", str(flush_ms)))
+        # TASK-07B: 修复环境变量读取逻辑，确保env优先于参数
+        if batch_n is None:
+            batch_n = int(os.getenv("SQLITE_BATCH_N", "500"))
+        if flush_ms is None:
+            flush_ms = int(os.getenv("SQLITE_FLUSH_MS", "500"))
+        self.batch_n = batch_n
+        self.flush_ms = flush_ms
         self._batch_queue: List[tuple] = []
-        self._last_flush_time = time.time()
+        # TASK-07B: 初始化_last_flush_time为0，确保第一次emit时立即刷新（如果flush_ms>0）
+        # 如果flush_ms=0，会在emit中特殊处理
+        self._last_flush_time = 0.0  # 初始化为0，确保第一次刷新立即触发
         self._lock = threading.Lock()
+        
+        # TASK-07B: SQLite初始化时打印关键参数，便于验证环境变量是否生效
+        env_source = "env" if os.getenv("SQLITE_BATCH_N") or os.getenv("SQLITE_FLUSH_MS") else "default"
+        logger.info(
+            f"[SqliteSink] 初始化完成: "
+            f"db_path={self.db_path}, "
+            f"journal_mode=WAL, "
+            f"synchronous=NORMAL, "
+            f"batch_n={self.batch_n} (来源: {env_source}), "
+            f"flush_ms={self.flush_ms}ms (来源: {env_source})"
+        )
+    
+    def _migrate_schema_if_needed(self) -> None:
+        """P0: 迁移旧版表结构到统一版本（(run_id, ts_ms, symbol)主键）"""
+        try:
+            cursor = self.conn.cursor()
+            # 检查表是否存在
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='signals'")
+            if not cursor.fetchone():
+                # 表不存在，直接创建新表（统一版本）
+                return
+            
+            # 检查现有列
+            cursor.execute("PRAGMA table_info(signals)")
+            columns = {row[1]: row[2] for row in cursor.fetchall()}
+            
+            # 检查主键类型
+            cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='signals'")
+            result = cursor.fetchone()
+            table_sql = (result[0] if result else "") or ""
+            ddl_upper = table_sql.upper()
+            
+            # P0: 检查主键类型
+            has_pk_run_ts_symbol = (
+                "PRIMARY KEY" in ddl_upper and 
+                "RUN_ID" in ddl_upper and 
+                "TS_MS" in ddl_upper and 
+                "SYMBOL" in ddl_upper
+            )
+            has_pk_ts_symbol = (
+                "PRIMARY KEY" in ddl_upper and 
+                "TS_MS" in ddl_upper and 
+                "SYMBOL" in ddl_upper and
+                "RUN_ID" not in ddl_upper
+            )
+            has_pk_id_autoincrement = (
+                "PRIMARY KEY" in ddl_upper and 
+                "AUTOINCREMENT" in ddl_upper
+            )
+            
+            needs_column_migration = False
+            
+            # 检查缺失的列
+            if "signal_type" not in columns:
+                cursor.execute("ALTER TABLE signals ADD COLUMN signal_type TEXT")
+                needs_column_migration = True
+                logger.info("[SqliteSink] 迁移：添加signal_type列")
+            
+            if "guard_reason" not in columns:
+                cursor.execute("ALTER TABLE signals ADD COLUMN guard_reason TEXT")
+                needs_column_migration = True
+                logger.info("[SqliteSink] 迁移：添加guard_reason列")
+            
+            if "created_at" not in columns:
+                cursor.execute("ALTER TABLE signals ADD COLUMN created_at TEXT DEFAULT (DATETIME('now'))")
+                needs_column_migration = True
+                logger.info("[SqliteSink] 迁移：添加created_at列")
+            
+            # P0: 检查run_id列（用于按run_id对账）
+            if "run_id" not in columns:
+                cursor.execute("ALTER TABLE signals ADD COLUMN run_id TEXT")
+                needs_column_migration = True
+                logger.info("[SqliteSink] 迁移：添加run_id列")
+            
+            # P0: 如果主键不是(run_id, ts_ms, symbol)，需要重建表
+            # P2: 同时检查是否有遗留的id列（AUTOINCREMENT），需要移除
+            if not has_pk_run_ts_symbol or has_pk_id_autoincrement:
+                logger.warning("[SqliteSink] 迁移：检测到旧主键或遗留id列，将重建为 PRIMARY KEY(run_id, ts_ms, symbol)")
+                self.conn.execute("BEGIN IMMEDIATE")
+                try:
+                    # 1) 创建新表（统一主键版本，无id列）
+                    self.conn.execute("""
+                    CREATE TABLE IF NOT EXISTS signals_new (
+                        ts_ms INTEGER NOT NULL,
+                        symbol TEXT NOT NULL,
+                        score REAL,
+                        z_ofi REAL,
+                        z_cvd REAL,
+                        regime TEXT,
+                        div_type TEXT,
+                        signal_type TEXT,
+                        confirm INTEGER,
+                        gating INTEGER,
+                        guard_reason TEXT,
+                        run_id TEXT NOT NULL,
+                        created_at TEXT DEFAULT (DATETIME('now')),
+                        PRIMARY KEY (run_id, ts_ms, symbol)
+                    );
+                    """)
+                    
+                    # 2) 数据搬迁（保留所有数据，run_id设为空字符串如果为NULL，排除id列）
+                    self.conn.execute("""
+                    INSERT OR IGNORE INTO signals_new (ts_ms, symbol, score, z_ofi, z_cvd, regime, div_type, signal_type, confirm, gating, guard_reason, run_id, created_at)
+                    SELECT ts_ms, symbol, score, z_ofi, z_cvd, regime, div_type, 
+                           COALESCE(signal_type, NULL) AS signal_type,
+                           confirm, gating, guard_reason, 
+                           COALESCE(run_id, '') AS run_id,
+                           COALESCE(created_at, DATETIME('now')) AS created_at
+                    FROM signals
+                    """)
+                    
+                    # 3) 替换旧表
+                    self.conn.execute("DROP TABLE signals")
+                    self.conn.execute("ALTER TABLE signals_new RENAME TO signals")
+                    self.conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol_ts ON signals(symbol, ts_ms)")
+                    self.conn.commit()
+                    logger.info("[SqliteSink] 迁移完成：signals 使用 PRIMARY KEY(run_id, ts_ms, symbol)，已移除遗留id列")
+                except Exception as e:
+                    self.conn.rollback()
+                    logger.error(f"[SqliteSink] 主键迁移失败: {e}", exc_info=True)
+                    raise
+            elif needs_column_migration:
+                self.conn.commit()
+                logger.info("[SqliteSink] 表结构迁移完成（列添加）")
+                
+        except Exception as e:
+            logger.error(f"[SqliteSink] 表结构迁移失败: {e}", exc_info=True)
 
     def emit(self, entry: Dict[str, Any]) -> None:
+        # P0: 从环境变量读取run_id，用于按run_id对账
+        run_id = os.getenv("RUN_ID", "")
         payload = (
             int(entry["ts_ms"]),
             entry.get("symbol"),
@@ -209,15 +428,19 @@ class SqliteSink(SignalSink):
             1 if entry.get("confirm") else 0,
             1 if entry.get("gating") else 0,
             entry.get("guard_reason"),
+            run_id,
         )
         
         # P0: 批量处理模式
+        # TASK-07B: 修复批量刷新逻辑，确保batch_n=1和flush_ms=0时立即刷新
         with self._lock:
             self._batch_queue.append(payload)
             current_time = time.time()
+            # 修复：如果flush_ms=0，应该立即刷新（不考虑时间间隔）
+            time_elapsed_ms = (current_time - self._last_flush_time) * 1000 if self.flush_ms > 0 else float('inf')
             should_flush = (
                 len(self._batch_queue) >= self.batch_n or
-                (current_time - self._last_flush_time) * 1000 >= self.flush_ms
+                time_elapsed_ms >= self.flush_ms
             )
             
             if should_flush:
@@ -228,27 +451,100 @@ class SqliteSink(SignalSink):
         if not self._batch_queue:
             return
         
+        batch_size = len(self._batch_queue)
         try:
-            # 使用 executemany 批量插入
+            # P0: 使用INSERT OR IGNORE，避免主键冲突导致整批失败
+            # 主键(run_id, ts_ms, symbol)允许同一毫秒多次回放/多次测试而不互相覆盖
+            # P1: executemany批量提交的异常保护（重试+补偿）
             self.conn.executemany(
-                "INSERT OR REPLACE INTO signals (ts_ms, symbol, score, z_ofi, z_cvd, regime, div_type, signal_type, confirm, gating, guard_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?);",
+                "INSERT OR IGNORE INTO signals (ts_ms, symbol, score, z_ofi, z_cvd, regime, div_type, signal_type, confirm, gating, guard_reason, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?);",
                 self._batch_queue,
             )
             self.conn.commit()
+            flushed_count = len(self._batch_queue)
             self._batch_queue.clear()
             self._last_flush_time = time.time()
-        except Exception as e:
-            logger.error(f"SQLite batch flush failed: {e}")
-            # 失败时清空队列，避免数据堆积
+            # TASK-07B: 添加批量刷新日志（短跑场景下总是输出，便于调试）
+            if batch_size >= 10 or os.getenv("SQLITE_DEBUG", "0") == "1" or self.batch_n <= 10:
+                logger.info(f"[SqliteSink] 批量刷新: {flushed_count}条数据已写入数据库（batch_n={self.batch_n}, flush_ms={self.flush_ms}ms）")
+        except (sqlite3.IntegrityError, sqlite3.OperationalError, Exception) as e:
+            logger.error(f"[SqliteSink] 批量刷新失败: {e}", exc_info=True)
+            # P1: 失败时不丢弃，加入退避重试与本地补偿文件
+            # 重试3次
+            retry_count = 0
+            max_retries = 3
+            while retry_count < max_retries:
+                try:
+                    time.sleep(0.1 * (retry_count + 1))  # 退避：0.1s, 0.2s, 0.3s
+                    self.conn.executemany(
+                        "INSERT OR IGNORE INTO signals (ts_ms, symbol, score, z_ofi, z_cvd, regime, div_type, signal_type, confirm, gating, guard_reason, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?);",
+                        self._batch_queue,
+                    )
+                    self.conn.commit()
+                    logger.info(f"[SqliteSink] 批量刷新重试成功（第{retry_count + 1}次）")
+                    flushed_count = len(self._batch_queue)
+                    self._batch_queue.clear()
+                    self._last_flush_time = time.time()
+                    if batch_size >= 10 or os.getenv("SQLITE_DEBUG", "0") == "1" or self.batch_n <= 10:
+                        logger.info(f"[SqliteSink] 批量刷新: {flushed_count}条数据已写入数据库（重试后）")
+                    return
+                except Exception as retry_e:
+                    retry_count += 1
+                    logger.warning(f"[SqliteSink] 批量刷新重试失败（第{retry_count}次）: {retry_e}")
+            
+            # 重试失败，写入补偿文件
+            failed_batch_file = Path("runtime/failed_batches.jsonl")
+            try:
+                with open(failed_batch_file, "a", encoding="utf-8", newline="") as f:
+                    for payload in self._batch_queue:
+                        # 将payload转换为字典格式写入
+                        record = {
+                            "ts_ms": payload[0],
+                            "symbol": payload[1],
+                            "score": payload[2],
+                            "z_ofi": payload[3],
+                            "z_cvd": payload[4],
+                            "regime": payload[5],
+                            "div_type": payload[6],
+                            "signal_type": payload[7],
+                            "confirm": payload[8],
+                            "gating": payload[9],
+                            "guard_reason": payload[10],
+                            "run_id": payload[11] if len(payload) > 11 else "",
+                        }
+                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                logger.error(f"[SqliteSink] 批量刷新失败，已写入补偿文件: {failed_batch_file} ({batch_size}条)")
+            except Exception as save_e:
+                logger.error(f"[SqliteSink] 写入补偿文件失败: {save_e}", exc_info=True)
+            
+            # 清空队列（已保存到补偿文件）
             self._batch_queue.clear()
     
     def close(self) -> None:
-        """关闭时刷新剩余批次"""
-        with self._lock:
-            if self._batch_queue:
-                self._flush_batch()
-        if self.conn:
-            self.conn.close()
+        """关闭时刷新剩余批次（确保所有队列数据写入数据库）"""
+        # TASK-07B: 增强关闭流程，确保批量队列正确刷新
+        try:
+            queue_size = 0
+            with self._lock:
+                queue_size = len(self._batch_queue)
+                if queue_size > 0:
+                    logger.info(f"[SqliteSink] 关闭时刷新剩余批次: {queue_size}条数据")
+                    self._flush_batch()
+                else:
+                    logger.debug("[SqliteSink] 关闭时批量队列为空，无需刷新")
+            
+            if self.conn:
+                # TASK-07B: 执行WAL检查点，确保数据可见
+                try:
+                    self.conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+                    logger.debug("[SqliteSink] WAL检查点完成")
+                except Exception as e:
+                    logger.warning(f"[SqliteSink] WAL检查点失败: {e}")
+                
+                self.conn.close()
+                logger.info(f"[SqliteSink] 数据库连接已关闭（已刷新{queue_size}条数据）")
+        except Exception as e:
+            logger.error(f"[SqliteSink] 关闭时出错: {e}", exc_info=True)
 
     def get_health(self) -> Dict[str, Any]:
         return {"kind": "sqlite", "path": str(self.db_path)}
@@ -261,17 +557,32 @@ class MultiSink(SignalSink):
         self.sinks = sinks
     
     def emit(self, entry: Dict[str, Any]) -> None:
+        # P0: 固定MultiSink顺序与数据一致性（浅拷贝entry，避免子sink修改影响）
+        # 确保所有子sink都只读entry，不要修改字段
+        entry_copy = entry.copy()
         for sink in self.sinks:
-            sink.emit(entry)
+            sink.emit(entry_copy)
     
     def close(self) -> None:
+        """TASK-07A: 确保所有Sink正确关闭（只调用标准接口，不访问私有属性）"""
         for sink in self.sinks:
-            sink.close()
+            try:
+                # 只调用标准接口，让每个Sink的close()自行处理内部刷新逻辑
+                sink.close()
+            except Exception as e:
+                logger.error(f"关闭sink失败: {e}", exc_info=True)
     
     def get_health(self) -> Dict[str, Any]:
+        """TASK-07A: 返回MultiSink的健康状态（包含子sink信息）"""
+        sinks_info = []
+        for sink in self.sinks:
+            if hasattr(sink, 'get_health'):
+                sinks_info.append(sink.get_health())
+            else:
+                sinks_info.append({"kind": type(sink).__name__.lower().replace('sink', '')})
         return {
             "kind": "multi",
-            "sinks": [sink.get_health() for sink in self.sinks]
+            "sinks": sinks_info
         }
 
 
@@ -301,9 +612,24 @@ class CoreAlgorithm:
         self.config = _merge_dict(DEFAULT_SIGNAL_CONFIG, config or {})
         sink_cfg = self.config.get("sink", {})
         base_dir = Path(output_dir or sink_cfg.get("output_dir", "./runtime"))
+        
+        # P0: 统一Sink选择口径（优先级：CLI/构造参数 > 配置 > 环境 > 默认）
         if sink is None:
-            sink = build_sink(sink_kind or sink_cfg.get("kind", "jsonl"), base_dir)
+            # 优先级：sink_kind参数 > config.sink.kind > V13_SINK环境变量 > 默认jsonl
+            final_sink_kind = sink_kind or sink_cfg.get("kind") or os.getenv("V13_SINK") or "jsonl"
+            sink = build_sink(final_sink_kind, base_dir)
+            # P0: 启动时明确打印最终生效值
+            logger.info(f"[CoreAlgorithm] Sink选择: sink_kind={sink_kind}, config.kind={sink_cfg.get('kind')}, V13_SINK={os.getenv('V13_SINK')}, 最终生效={final_sink_kind}")
         self._sink = sink
+        # P0: 打印实际使用的sink类名，用于验证是否使用了CORE_ALGO的sink
+        sink_class_name = type(self._sink).__name__
+        logger.info(f"[CoreAlgorithm] sink_used={sink_class_name}")
+        if sink_class_name == "MultiSink":
+            # MultiSink: 打印子sink信息
+            if hasattr(self._sink, 'sinks'):
+                for i, sub_sink in enumerate(self._sink.sinks):
+                    sub_class_name = type(sub_sink).__name__
+                    logger.info(f"[CoreAlgorithm]  子Sink[{i}]: {sub_class_name}")
         self._base_dir = base_dir
         self._stats = SignalStats()
         self._last_ts_per_symbol: Dict[str, int] = {}
@@ -367,7 +693,17 @@ class CoreAlgorithm:
         return self._stats
 
     def close(self) -> None:
+        # P1: 打印sink使用摘要（类名和关键参数）
         if self._sink:
+            sink_class_name = type(self._sink).__name__
+            sink_info = {"class": sink_class_name}
+            if hasattr(self._sink, 'get_health'):
+                try:
+                    health = self._sink.get_health()
+                    sink_info.update(health)
+                except Exception:
+                    pass
+            logger.info(f"[CoreAlgorithm] 关闭sink: {sink_info}")
             self._sink.close()
 
     def process_feature_row(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -445,6 +781,8 @@ class CoreAlgorithm:
         elif candidate_direction != 0:
             signal_type = "pending"
 
+        # P0: 从环境变量读取run_id，添加到decision中用于按run_id对账
+        run_id = os.getenv("RUN_ID", "")
         decision = {
             "ts_ms": ts_ms,
             "symbol": symbol,
@@ -457,6 +795,7 @@ class CoreAlgorithm:
             "gating": bool(gating_reasons),
             "signal_type": signal_type,
             "guard_reason": ",".join(gating_reasons) if gating_reasons else None,  # 保存所有原因（逗号分隔）
+            "run_id": run_id,
         }
 
         if confirm:

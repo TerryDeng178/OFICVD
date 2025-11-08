@@ -99,6 +99,8 @@ repo/
 │  ├─ TASK-05 - CORE_ALGO 信号服务（Sink－JSONL 或 SQLite）.md
 │  ├─ TASK-06 - StrategyMode ＆ 风控护栏（spread／lag／activity 等）.md
 │  ├─ TASK-07 - Orchestrator 编排与端到端冒烟.md
+│  ├─ TASK-07A - LIVE 60分钟端到端实测（Soak Test）.md
+│  ├─ TASK-07B - 双Sink等价性收敛.md
 │  ├─ TASK-08 - 回放＋回测 Harness（JSONL 或 Parquet → 信号 → PnL）.md
 │  ├─ TASK-09 - 复盘报表（时段胜率、盈亏比、滑点、费用）.md
 │  └─ TASK-10 - 文档与契约同步（／docs 与 README 链接校验）.md
@@ -522,6 +524,8 @@ python -m orchestrator.run \
 - ✅ **TASK-07** - Orchestrator 编排与端到端冒烟**（已签收，2025-11-08）**
 
 **M3 · 编排、回测与复盘**：
+- **TASK-07A** - LIVE 60 分钟端到端实测（Soak Test）
+- **TASK-07B** - 双 Sink 等价性收敛（目标 < 0.2%）
 - **TASK-08** - 回放/回测 Harness（JSONL/Parquet → 信号 → PnL）
 - **TASK-09** - 复盘报表（时段胜率、盈亏比、滑点、费用）
 - **TASK-10** - 文档与契约同步（/docs 与 README 链接校验）

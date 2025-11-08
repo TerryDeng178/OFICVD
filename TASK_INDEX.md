@@ -5,7 +5,7 @@
 
 - **M1 · 数据打通**：TASK-01 ~ 04
 - **M2 · 信号与风控**：TASK-05 ~ 07
-- **M3 · 编排、回测与复盘**：TASK-08 ~ 10
+- **M3 · 编排、回测与复盘**：TASK-07A ~ 10
 
 ## 任务清单
 1. ✅ TASK-01 - 统一 Row Schema & 出站 DQ Gate（Data Contract）  
@@ -15,9 +15,11 @@
 5. ✅ TASK-05 - CORE_ALGO 信号服务（Sink: JSONL/SQLite）  
 6. ✅ TASK-06 - StrategyMode & 风控护栏（spread/lag/activity 等）**（已签收，2025-11-07）**  
 7. ✅ TASK-07 - Orchestrator 编排与端到端冒烟**（已签收，2025-11-08）**  
-8. TASK-08 - 回放/回测 Harness（JSONL/Parquet → 信号 → PnL）  
-9. TASK-09 - 复盘报表（时段胜率、盈亏比、滑点、费用）  
-10. TASK-10 - 文档与契约同步（/docs 与 README 链接校验）  
+8. ⏳ TASK-07A - LIVE 60 分钟端到端实测（Soak Test）  
+9. ⏳ TASK-07B - 双 Sink 等价性收敛（目标 < 0.2%）  
+10. TASK-08 - 回放/回测 Harness（JSONL/Parquet → 信号 → PnL）  
+11. TASK-09 - 复盘报表（时段胜率、盈亏比、滑点、费用）  
+12. TASK-10 - 文档与契约同步（/docs 与 README 链接校验）  
 
 ### TASK-06 完成摘要
 
@@ -64,6 +66,8 @@
 - 05 依赖 04  
 - 06 依赖 05  
 - 07 依赖 03/05/06  
+- 07A 依赖 07  
+- 07B 依赖 07/07A  
 - 08 依赖 01/04/05  
 - 09 依赖 08  
 - 10 贯穿全程
