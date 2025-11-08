@@ -25,11 +25,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+# P0: 三级回退导入（alpha_core → 本地 → 不可用）
 try:
-    from alpha_core.risk.strategy_mode import StrategyModeManager, MarketActivity
+    from alpha_core.risk.strategy_mode import StrategyModeManager, StrategyMode, MarketActivity
     STRATEGY_MODE_AVAILABLE = True
-except ImportError:
-    STRATEGY_MODE_AVAILABLE = False
+except Exception:
+    try:
+        from strategy_mode_manager import StrategyModeManager, StrategyMode, MarketActivity
+        STRATEGY_MODE_AVAILABLE = True
+    except Exception:
+        StrategyModeManager = None
+        StrategyMode = None
+        MarketActivity = None
+        STRATEGY_MODE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 if not STRATEGY_MODE_AVAILABLE:

@@ -644,6 +644,8 @@ class Reporter:
         # TASK-07A: 时序库导出统计
         self.timeseries_export_count = 0
         self.timeseries_export_errors = 0
+        # P1: 时序库导出失败跟踪（用于连续失败告警）
+        self._export_failure_history = []  # List of {"timestamp": ..., "failed": True/False}
         # TASK-07A: 告警记录（触发/恢复时间）
         self.alerts_history = []  # List of {"triggered_at": ..., "recovered_at": ..., "alert": ...}
         
@@ -1143,10 +1145,20 @@ class Reporter:
             
             # TASK-07A: 记录导出成功
             self.timeseries_export_count += 1
+            # P1: 记录导出成功到历史
+            self._export_failure_history.append({"timestamp": datetime.utcnow().isoformat(), "failed": False})
+            # 只保留最近10分钟的历史（避免内存增长）
+            if len(self._export_failure_history) > 10:
+                self._export_failure_history.pop(0)
         except Exception as e:
             logger.warning(f"[timeseries] 导出失败: {e}")
             # TASK-07A: 记录导出错误
             self.timeseries_export_errors += 1
+            # P1: 记录导出失败到历史
+            self._export_failure_history.append({"timestamp": datetime.utcnow().isoformat(), "failed": True})
+            # 只保留最近10分钟的历史（避免内存增长）
+            if len(self._export_failure_history) > 10:
+                self._export_failure_history.pop(0)
     
     def get_timeseries_export_stats(self) -> Dict:
         """TASK-07A: 获取时序库导出统计"""
@@ -1156,7 +1168,7 @@ class Reporter:
         }
     
     def _print_startup_config(self) -> None:
-        """P0.5: 启动时打印所有关键环境变量，便于复现与比对"""
+        """P0.5/P1: 启动时打印所有关键环境变量，便于复现与比对"""
         logger.info("=" * 80)
         logger.info("[Reporter] 启动配置快照:")
         logger.info(f"  V13_SINK: {os.getenv('V13_SINK', '未设置')}")
@@ -1172,6 +1184,9 @@ class Reporter:
             logger.info(f"  INFLUX_BUCKET: {os.getenv('INFLUX_BUCKET', '未设置')}")
             logger.info(f"  INFLUX_TOKEN: {'已设置' if os.getenv('INFLUX_TOKEN') else '未设置'}")
         logger.info(f"  RUN_ID: {os.getenv('RUN_ID', '未设置')}")
+        logger.info(f"  REPORT_TZ: {os.getenv('REPORT_TZ', '未设置（默认UTC）')}")
+        logger.info(f"  V13_REPLAY_MODE: {os.getenv('V13_REPLAY_MODE', '未设置（默认0=LIVE）')}")
+        logger.info(f"  V13_INPUT_MODE: {os.getenv('V13_INPUT_MODE', '未设置（默认preview）')}")
         logger.info("=" * 80)
     
     def _check_timeseries_health(self) -> None:
@@ -1219,17 +1234,31 @@ class Reporter:
         except requests.exceptions.ConnectionError as e:
             warning_msg = f"[timeseries.health] 时序库连接失败（域名解析/连通性问题）: {e}"
             logger.warning(warning_msg)
+            # P1: 添加重试/降级提示文案
+            logger.warning("[timeseries.health] 提示: 时序库连接失败不会中断主流程，但指标将无法导出。请检查:")
+            logger.warning(f"  1. TIMESERIES_URL是否正确: {timeseries_url}")
+            logger.warning("  2. 时序库服务是否运行（Pushgateway/InfluxDB）")
+            logger.warning("  3. 网络连接是否正常")
+            logger.warning("  4. 防火墙/安全组是否允许访问")
             # P0.5: 连接失败时记录到warnings，便于日报诊断
             if not hasattr(self, '_timeseries_health_warning'):
                 self._timeseries_health_warning = warning_msg
         except requests.exceptions.Timeout as e:
             warning_msg = f"[timeseries.health] 时序库连接超时: {e}"
             logger.warning(warning_msg)
+            # P1: 添加重试/降级提示文案
+            logger.warning("[timeseries.health] 提示: 时序库连接超时不会中断主流程，但指标将无法导出。请检查:")
+            logger.warning(f"  1. TIMESERIES_URL是否可达: {timeseries_url}")
+            logger.warning("  2. 网络延迟是否过高")
+            logger.warning("  3. 时序库服务是否负载过高")
             if not hasattr(self, '_timeseries_health_warning'):
                 self._timeseries_health_warning = warning_msg
         except Exception as e:
             warning_msg = f"[timeseries.health] 时序库健康检查失败: {e}"
             logger.warning(warning_msg)
+            # P1: 添加重试/降级提示文案
+            logger.warning("[timeseries.health] 提示: 时序库健康检查失败不会中断主流程，但指标将无法导出。")
+            logger.warning("  请检查时序库配置和服务状态，或禁用时序库导出（TIMESERIES_ENABLED=0）")
             if not hasattr(self, '_timeseries_health_warning'):
                 self._timeseries_health_warning = warning_msg
     
@@ -1483,6 +1512,44 @@ class Reporter:
             # TASK-07A: 记录告警历史
             self._record_alert(alert)
         
+        # P1: 告警规则 4: 时序库导出连续失败
+        if self.timeseries_export_errors > 0:
+            # 检查连续失败次数（简化实现：基于错误计数）
+            # 实际应该跟踪每分钟的导出状态
+            consecutive_failures = self._get_consecutive_export_failures()
+            if consecutive_failures >= 3:  # 连续3分钟失败
+                alert = {
+                    "level": "warning",
+                    "rule": "timeseries_export_failure",
+                    "message": f"时序库导出连续失败{consecutive_failures}分钟（总错误数: {self.timeseries_export_errors}）",
+                    "triggered_at": current_time,
+                    "recovered_at": None,
+                    "details": {
+                        "consecutive_failures": consecutive_failures,
+                        "total_errors": self.timeseries_export_errors,
+                        "export_count": self.timeseries_export_count
+                    }
+                }
+                alerts.append(alert)
+                self._record_alert(alert)
+        
+        # P1: 告警规则 5: 数据丢包（dropped > 0）
+        dropped = report.get("dropped", 0)
+        if dropped > 0:
+            alert = {
+                "level": "warning",
+                "rule": "data_dropped",
+                "message": f"检测到数据丢失: {dropped}条",
+                "triggered_at": current_time,
+                "recovered_at": None,
+                "details": {
+                    "dropped": dropped,
+                    "total": report.get("total", 0)
+                }
+            }
+            alerts.append(alert)
+            self._record_alert(alert)
+        
         # TASK-07A: 检查告警恢复（如果之前有告警但现在没有了）
         self._check_alert_recovery(alerts, current_time)
         
@@ -1505,6 +1572,21 @@ class Reporter:
                 "recovered_at": None,
                 "alert": alert
             })
+    
+    def _get_consecutive_export_failures(self) -> int:
+        """P1: 获取连续导出失败次数"""
+        if not self._export_failure_history:
+            return 0
+        
+        # 从最近开始检查连续失败次数
+        consecutive = 0
+        for entry in reversed(self._export_failure_history):
+            if entry.get("failed", False):
+                consecutive += 1
+            else:
+                break
+        
+        return consecutive
     
     def _check_alert_recovery(self, current_alerts: List[Dict], current_time: str):
         """TASK-07A: 检查告警恢复"""

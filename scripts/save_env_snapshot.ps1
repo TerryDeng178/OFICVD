@@ -34,8 +34,7 @@ $env_snapshot = @{
     "INFLUX_URL" = $env:INFLUX_URL
     "INFLUX_ORG" = $env:INFLUX_ORG
     "INFLUX_BUCKET" = $env:INFLUX_BUCKET
-    "INFLUX_TOKEN" = if ($env:INFLUX_TOKEN) { "已设置" } else { "未设置" }
-    "RUN_ID" = $env:RUN_ID
+    "INFLUX_TOKEN" = if ($env:INFLUX_TOKEN) { "SET" } else { "NOT_SET" }
     "REPORT_TZ" = $env:REPORT_TZ
 }
 
