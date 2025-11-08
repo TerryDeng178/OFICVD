@@ -646,6 +646,12 @@ class Reporter:
         self.timeseries_export_errors = 0
         # TASK-07A: 告警记录（触发/恢复时间）
         self.alerts_history = []  # List of {"triggered_at": ..., "recovered_at": ..., "alert": ...}
+        
+        # P0.5: 启动时打印所有关键环境变量，便于复现与比对
+        self._print_startup_config()
+        
+        # P1: 启动期健康检查（时序库连接预检）
+        self._check_timeseries_health()
     
     def _normalize_guard_reason(self, reason: str) -> str:
         """规范化护栏原因名称，统一别名到规范名"""
@@ -1086,6 +1092,10 @@ class Reporter:
             conn.close()
         except Exception as e:
             report["warnings"].append(f"查询数据库失败: {e}")
+        
+        # P0.5: 如果时序库健康检查失败，添加到warnings
+        if hasattr(self, '_timeseries_health_warning'):
+            report["warnings"].append(f"时序库健康检查: {self._timeseries_health_warning}")
     
     def save_report(self, report: Dict, format: str = "both"):
         """保存日报"""
@@ -1145,97 +1155,259 @@ class Reporter:
             "error_count": self.timeseries_export_errors
         }
     
-    def _export_to_prometheus(self, ts_data: Dict, timestamp: str, url: str):
-        """导出到 Prometheus Pushgateway"""
+    def _print_startup_config(self) -> None:
+        """P0.5: 启动时打印所有关键环境变量，便于复现与比对"""
+        logger.info("=" * 80)
+        logger.info("[Reporter] 启动配置快照:")
+        logger.info(f"  V13_SINK: {os.getenv('V13_SINK', '未设置')}")
+        logger.info(f"  SQLITE_BATCH_N: {os.getenv('SQLITE_BATCH_N', '未设置（默认500）')}")
+        logger.info(f"  SQLITE_FLUSH_MS: {os.getenv('SQLITE_FLUSH_MS', '未设置（默认500）')}")
+        logger.info(f"  FSYNC_EVERY_N: {os.getenv('FSYNC_EVERY_N', '未设置（默认50）')}")
+        logger.info(f"  TIMESERIES_ENABLED: {os.getenv('TIMESERIES_ENABLED', '未设置（默认0）')}")
+        logger.info(f"  TIMESERIES_TYPE: {os.getenv('TIMESERIES_TYPE', '未设置（默认prometheus）')}")
+        logger.info(f"  TIMESERIES_URL: {os.getenv('TIMESERIES_URL', '未设置')}")
+        if os.getenv('TIMESERIES_TYPE', '').lower() == 'influxdb':
+            logger.info(f"  INFLUX_URL: {os.getenv('INFLUX_URL', '未设置')}")
+            logger.info(f"  INFLUX_ORG: {os.getenv('INFLUX_ORG', '未设置')}")
+            logger.info(f"  INFLUX_BUCKET: {os.getenv('INFLUX_BUCKET', '未设置')}")
+            logger.info(f"  INFLUX_TOKEN: {'已设置' if os.getenv('INFLUX_TOKEN') else '未设置'}")
+        logger.info(f"  RUN_ID: {os.getenv('RUN_ID', '未设置')}")
+        logger.info("=" * 80)
+    
+    def _check_timeseries_health(self) -> None:
+        """P1: 启动期健康检查（时序库连接预检）"""
+        timeseries_enabled = os.getenv("TIMESERIES_ENABLED", "0") == "1"
+        if not timeseries_enabled:
+            return
+        
+        timeseries_type = os.getenv("TIMESERIES_TYPE", "prometheus").lower()
+        timeseries_url = os.getenv("TIMESERIES_URL", "")
+        
+        if not timeseries_url:
+            logger.warning("[timeseries.health] TIMESERIES_URL 未配置，跳过健康检查")
+            return
+        
         try:
             import requests
-            
-            # 构建指标
-            metrics = []
-            
-            # total 指标
-            total = ts_data.get("total", 0)
-            metrics.append(f"signal_total {total}")
-            
-            # strong_ratio 指标
-            strong_ratio = ts_data.get("strong_ratio", 0.0)
-            metrics.append(f"signal_strong_ratio {strong_ratio}")
-            
-            # gating_breakdown 指标
-            gating_breakdown = ts_data.get("gating_breakdown", {})
-            for reason, count in gating_breakdown.items():
-                reason_safe = reason.replace(".", "_").replace("-", "_")
-                metrics.append(f'signal_gating_breakdown{{reason="{reason_safe}"}} {count}')
-            
-            # per_minute 指标（每分钟总量）
-            per_minute = ts_data.get("per_minute", [])
-            for minute_data in per_minute:
-                minute = minute_data.get("minute", "")
-                total_minute = minute_data.get("count", 0)
-                metrics.append(f'signal_per_minute_total{{minute="{minute}"}} {total_minute}')
-            
-            # 推送到 Pushgateway
-            metrics_text = "\n".join(metrics)
-            response = requests.post(
-                f"{url}/metrics/job/signal_reporter",
-                data=metrics_text,
-                headers={"Content-Type": "text/plain"},
-                timeout=5
-            )
-            response.raise_for_status()
-            logger.info(f"[timeseries] 已导出 {len(metrics)} 个指标到 Prometheus")
         except ImportError:
-            logger.warning("[timeseries] requests 库未安装，无法导出到 Prometheus")
+            logger.warning("[timeseries.health] requests 库未安装，跳过健康检查")
+            return
+        
+        try:
+            if timeseries_type == "prometheus":
+                # Pushgateway健康检查
+                response = requests.get(f"{timeseries_url}/metrics", timeout=5)
+                if response.status_code == 200:
+                    logger.info(f"[timeseries.health] Pushgateway可达: {timeseries_url}")
+                else:
+                    logger.warning(f"[timeseries.health] Pushgateway返回状态码: {response.status_code}")
+            elif timeseries_type == "influxdb":
+                # InfluxDB v2健康检查
+                influx_url = os.getenv("INFLUX_URL", timeseries_url)
+                influx_token = os.getenv("INFLUX_TOKEN", "")
+                if influx_token:
+                    headers = {"Authorization": f"Token {influx_token}"}
+                    response = requests.get(f"{influx_url}/health", headers=headers, timeout=5)
+                    if response.status_code == 200:
+                        logger.info(f"[timeseries.health] InfluxDB可达: {influx_url}")
+                    else:
+                        logger.warning(f"[timeseries.health] InfluxDB返回状态码: {response.status_code}")
+                else:
+                    logger.warning("[timeseries.health] INFLUX_TOKEN 未配置，无法进行健康检查")
+            else:
+                logger.warning(f"[timeseries.health] 不支持的时序库类型: {timeseries_type}")
+        except requests.exceptions.ConnectionError as e:
+            warning_msg = f"[timeseries.health] 时序库连接失败（域名解析/连通性问题）: {e}"
+            logger.warning(warning_msg)
+            # P0.5: 连接失败时记录到warnings，便于日报诊断
+            if not hasattr(self, '_timeseries_health_warning'):
+                self._timeseries_health_warning = warning_msg
+        except requests.exceptions.Timeout as e:
+            warning_msg = f"[timeseries.health] 时序库连接超时: {e}"
+            logger.warning(warning_msg)
+            if not hasattr(self, '_timeseries_health_warning'):
+                self._timeseries_health_warning = warning_msg
         except Exception as e:
-            logger.warning(f"[timeseries] Prometheus 导出失败: {e}")
+            warning_msg = f"[timeseries.health] 时序库健康检查失败: {e}"
+            logger.warning(warning_msg)
+            if not hasattr(self, '_timeseries_health_warning'):
+                self._timeseries_health_warning = warning_msg
+    
+    def _export_to_prometheus(self, ts_data: Dict, timestamp: str, url: str):
+        """导出到 Prometheus Pushgateway（带重试和指数退避）
+        
+        如果导出失败，抛出异常让调用者处理
+        """
+        try:
+            import requests
+        except ImportError:
+            raise ImportError("requests 库未安装，无法导出到 Prometheus")
+        
+        # 构建指标
+        metrics = []
+        
+        # total 指标
+        total = ts_data.get("total", 0)
+        metrics.append(f"signal_total {total}")
+        
+        # strong_ratio 指标
+        strong_ratio = ts_data.get("strong_ratio", 0.0)
+        metrics.append(f"signal_strong_ratio {strong_ratio}")
+        
+        # gating_breakdown 指标
+        gating_breakdown = ts_data.get("gating_breakdown", {})
+        for reason, count in gating_breakdown.items():
+            reason_safe = reason.replace(".", "_").replace("-", "_")
+            metrics.append(f'signal_gating_breakdown{{reason="{reason_safe}"}} {count}')
+        
+        # per_minute 指标（每分钟总量）
+        per_minute = ts_data.get("per_minute", [])
+        for minute_data in per_minute:
+            minute = minute_data.get("minute", "")
+            total_minute = minute_data.get("count", 0)
+            metrics.append(f'signal_per_minute_total{{minute="{minute}"}} {total_minute}')
+        
+        # P1: 推送到 Pushgateway（带重试和指数退避）
+        # P0.5: Prometheus格式要求：必须以换行符结尾，且每行格式为 <metric_name> <value> 或 <metric_name>{<labels>} <value>
+        metrics_text = "\n".join(metrics)
+        if metrics_text and not metrics_text.endswith("\n"):
+            metrics_text += "\n"  # 确保以换行符结尾
+        
+        max_retries = 3
+        retry_delays = [0.5, 1.0, 2.0]  # 指数退避：0.5s, 1s, 2s
+        
+        last_exception = None
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    f"{url}/metrics/job/signal_reporter",
+                    data=metrics_text,
+                    headers={"Content-Type": "text/plain; charset=utf-8"},
+                    timeout=5
+                )
+                response.raise_for_status()
+                if attempt > 0:
+                    logger.info(f"[timeseries] Prometheus导出成功（第{attempt + 1}次重试）")
+                else:
+                    logger.info(f"[timeseries] 已导出 {len(metrics)} 个指标到 Prometheus")
+                return
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    delay = retry_delays[attempt]
+                    logger.warning(f"[timeseries] Prometheus导出失败（第{attempt + 1}次尝试）: {e}，{delay}秒后重试")
+                    import time
+                    time.sleep(delay)
+                else:
+                    logger.error(f"[timeseries] Prometheus导出失败（已重试{max_retries}次）: {e}")
+        
+        # 所有重试都失败，抛出最后一个异常
+        raise last_exception
     
     def _export_to_influxdb(self, ts_data: Dict, timestamp: str, url: str):
-        """导出到 InfluxDB"""
+        """导出到 InfluxDB v2（Line Protocol + API v2，带重试和指数退避）
+        
+        P0: 修正为v2标准写入：Line Protocol + POST {INFLUX_URL}/api/v2/write?org={ORG}&bucket={BUCKET}&precision=ns
+        如果导出失败，抛出异常让调用者处理
+        """
         try:
             import requests
-            
-            # 构建数据点
-            points = []
-            
-            # total 指标
-            total = ts_data.get("total", 0)
-            points.append({
-                "measurement": "signal_total",
-                "time": timestamp,
-                "fields": {"value": total}
-            })
-            
-            # strong_ratio 指标
-            strong_ratio = ts_data.get("strong_ratio", 0.0)
-            points.append({
-                "measurement": "signal_strong_ratio",
-                "time": timestamp,
-                "fields": {"value": strong_ratio}
-            })
-            
-            # gating_breakdown 指标
-            gating_breakdown = ts_data.get("gating_breakdown", {})
-            for reason, count in gating_breakdown.items():
-                points.append({
-                    "measurement": "signal_gating_breakdown",
-                    "time": timestamp,
-                    "tags": {"reason": reason},
-                    "fields": {"value": count}
-                })
-            
-            # 推送到 InfluxDB
-            data = {"points": points}
-            response = requests.post(
-                f"{url}/write",
-                json=data,
-                timeout=5
-            )
-            response.raise_for_status()
-            logger.info(f"[timeseries] 已导出 {len(points)} 个数据点到 InfluxDB")
         except ImportError:
-            logger.warning("[timeseries] requests 库未安装，无法导出到 InfluxDB")
-        except Exception as e:
-            logger.warning(f"[timeseries] InfluxDB 导出失败: {e}")
+            raise ImportError("requests 库未安装，无法导出到 InfluxDB")
+        
+        # P0: 读取InfluxDB v2必需的环境变量
+        influx_url = os.getenv("INFLUX_URL", url)  # 兼容旧配置
+        influx_org = os.getenv("INFLUX_ORG", "")
+        influx_bucket = os.getenv("INFLUX_BUCKET", "")
+        influx_token = os.getenv("INFLUX_TOKEN", "")
+        
+        if not influx_org or not influx_bucket or not influx_token:
+            raise ValueError("InfluxDB v2 需要配置 INFLUX_ORG、INFLUX_BUCKET 和 INFLUX_TOKEN 环境变量")
+        
+        # P0: 构建Line Protocol格式的数据
+        # 格式：measurement,tag1=value1,tag2=value2 field1=value1i,field2=value2 {timestamp_ns}
+        lines = []
+        
+        # 解析timestamp为纳秒（InfluxDB v2要求）
+        try:
+            from datetime import datetime
+            if isinstance(timestamp, str):
+                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            else:
+                dt = timestamp
+            ts_ns = int(dt.timestamp() * 1e9)
+        except Exception:
+            import time
+            ts_ns = int(time.time() * 1e9)
+        
+        # total 指标
+        total = ts_data.get("total", 0)
+        lines.append(f"signal_total value={total}i {ts_ns}")
+        
+        # strong_ratio 指标
+        strong_ratio = ts_data.get("strong_ratio", 0.0)
+        lines.append(f"signal_strong_ratio value={strong_ratio} {ts_ns}")
+        
+        # gating_breakdown 指标（带reason标签）
+        gating_breakdown = ts_data.get("gating_breakdown", {})
+        for reason, count in gating_breakdown.items():
+            # 转义特殊字符（空格、逗号、等号）
+            reason_escaped = reason.replace(" ", "\\ ").replace(",", "\\,").replace("=", "\\=")
+            lines.append(f'signal_gating_breakdown,reason={reason_escaped} value={count}i {ts_ns}')
+        
+        # per_minute 指标（带minute标签）
+        per_minute = ts_data.get("per_minute", [])
+        for minute_data in per_minute:
+            minute = minute_data.get("minute", "")
+            total_minute = minute_data.get("count", 0)
+            minute_escaped = minute.replace(" ", "\\ ").replace(",", "\\,").replace("=", "\\=")
+            lines.append(f'signal_per_minute_total,minute={minute_escaped} value={total_minute}i {ts_ns}')
+        
+        # P0: 推送到 InfluxDB v2 API（Line Protocol格式）
+        line_protocol_text = "\n".join(lines)
+        endpoint = f"{influx_url}/api/v2/write"
+        params = {
+            "org": influx_org,
+            "bucket": influx_bucket,
+            "precision": "ns"
+        }
+        headers = {
+            "Authorization": f"Token {influx_token}",
+            "Content-Type": "text/plain; charset=utf-8"
+        }
+        
+        # P1: 带重试和指数退避
+        max_retries = 3
+        retry_delays = [0.5, 1.0, 2.0]  # 指数退避：0.5s, 1s, 2s
+        
+        last_exception = None
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    endpoint,
+                    params=params,
+                    data=line_protocol_text,
+                    headers=headers,
+                    timeout=5
+                )
+                response.raise_for_status()
+                if attempt > 0:
+                    logger.info(f"[timeseries] InfluxDB导出成功（第{attempt + 1}次重试）")
+                else:
+                    logger.info(f"[timeseries] 已导出 {len(lines)} 个数据点到 InfluxDB v2")
+                return
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    delay = retry_delays[attempt]
+                    logger.warning(f"[timeseries] InfluxDB导出失败（第{attempt + 1}次尝试）: {e}，{delay}秒后重试")
+                    import time
+                    time.sleep(delay)
+                else:
+                    logger.error(f"[timeseries] InfluxDB导出失败（已重试{max_retries}次）: {e}")
+        
+        # 所有重试都失败，抛出最后一个异常
+        raise last_exception
     
     def _check_alerts(self, report: Dict):
         """P1: 检查告警规则"""
@@ -1640,6 +1812,12 @@ class Reporter:
         if report.get('runtime_state'):
             runtime_state = report['runtime_state']
             fp.write(f"## 运行态（StrategyMode 快照汇总）\n\n")
+            
+            # P2: 报表可观测性补强 - 当检测到preview时，在日报加一行提示
+            input_mode = os.getenv("V13_INPUT_MODE", "preview")
+            snapshots = runtime_state.get('snapshots', [])
+            if input_mode == "preview" and not snapshots:
+                fp.write(f"> **提示**: StrategyMode 快照在回放模式（preview）下默认为空，这是正常现象。\n\n")
             
             summary = runtime_state.get('summary', {})
             if summary:
@@ -2278,6 +2456,16 @@ async def main_async(args):
                     symbols = _extract_symbols_from_config(config_path)
                     config_snapshot = _get_config_snapshot(config_path)
                 
+                # P1: LIVE/preview标识与输入目录收敛
+                # 报告里把"数据源模式（raw/preview）、--watch开启与否、特征目录路径"三者一起写入source_manifest
+                input_mode = env_overrides.get("V13_INPUT_MODE", "preview")
+                replay_mode = env_overrides.get("V13_REPLAY_MODE", "0") == "1"
+                is_replay_mode = replay_mode or config_path.name.startswith("replay")
+                # P1: 判断--watch是否开启（LIVE模式开启，回放模式关闭）
+                watch_enabled = not is_replay_mode
+                # P1: 获取特征目录路径
+                features_dir = project_root / "deploy" / "data" / "ofi_cvd" / input_mode
+                
                 source_manifest = {
                     "run_id": manifest["run_id"],
                     "session_start": started_at.isoformat(),
@@ -2286,8 +2474,10 @@ async def main_async(args):
                     "ws_endpoint": env_overrides.get("WS_ENDPOINT", os.getenv("WS_ENDPOINT", "wss://fstream.binance.com")),
                     "ws_region": env_overrides.get("WS_REGION", os.getenv("WS_REGION", "default")),
                     "config_snapshot": config_snapshot,
-                    "input_mode": env_overrides.get("V13_INPUT_MODE", "preview"),
-                    "replay_mode": env_overrides.get("V13_REPLAY_MODE", "0") == "1"
+                    "input_mode": input_mode,  # raw | preview
+                    "replay_mode": replay_mode,  # true | false
+                    "watch_enabled": watch_enabled,  # P1: --watch开启与否
+                    "features_dir": str(features_dir)  # P1: 特征目录路径
                 }
                 source_manifest_path = artifacts_dir / f"source_manifest_{manifest['run_id']}.json"
                 with source_manifest_path.open("w", encoding="utf-8") as fp:

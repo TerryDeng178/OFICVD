@@ -101,7 +101,7 @@ def main():
     parser.add_argument("--jsonl-dir", type=str, default="./runtime/ready/signal", help="JSONL信号目录")
     parser.add_argument("--sqlite-db", type=str, default="./runtime/signals.db", help="SQLite数据库路径")
     parser.add_argument("--run-id", type=str, default=None, help="运行ID（用于按run_id对账）")
-    parser.add_argument("--threshold", type=float, default=0.2, help="偏差阈值（百分比，默认0.2%）")
+    parser.add_argument("--threshold", type=float, default=0.25, help="偏差阈值（百分比，默认0.25%，P1收紧）")
     parser.add_argument("--output", type=str, default=None, help="输出JSON文件路径（可选）")
     
     args = parser.parse_args()

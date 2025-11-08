@@ -122,19 +122,27 @@ class JsonlSink(SignalSink):
         # 引入 FSYNC_EVERY_N 环境变量（默认 50），在后台线程场景下按批次 fsync
         self.fsync_every_n = int(os.getenv("FSYNC_EVERY_N", str(fsync_every_n)))
         self._write_count = 0
+        self._last_minute = None  # P0: 跟踪上一个文件的minute，用于检测文件切换
+        
+        # P0.5: 启动时打印最终生效的fsync策略，便于复现与比对
+        logger.info(f"[JsonlSink] fsync策略: every_n={self.fsync_every_n}（每{self.fsync_every_n}次写入执行一次fsync）")
 
     def emit(self, entry: Dict[str, Any]) -> None:
         # P0: 在JSONL中追加run_id字段，用于按run_id对账
+        # P1: 统一run_id贯穿JSONL/SQLite，确保JSONL包含所有必需字段（signal_type、created_at）
         # 强制从环境变量读取run_id（覆盖entry中可能存在的空值）
         run_id_env = os.getenv("RUN_ID", "")
         # 始终设置run_id字段（即使环境变量为空，也要写入字段）
         entry["run_id"] = run_id_env
-        # 调试：确保run_id字段存在
-        if "run_id" not in entry:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"[JsonlSink] run_id字段缺失，entry keys: {list(entry.keys())}")
-            entry["run_id"] = run_id_env if run_id_env else ""
+        
+        # P1: 确保signal_type字段存在（与SQLite对齐）
+        if "signal_type" not in entry:
+            entry["signal_type"] = "neutral"
+        
+        # P1: 确保created_at字段存在（与SQLite对齐）
+        if "created_at" not in entry:
+            entry["created_at"] = datetime.now(timezone.utc).isoformat()
+        
         ts_ms = int(entry["ts_ms"])
         dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
         minute = dt.strftime("%Y%m%d_%H%M")
@@ -142,35 +150,23 @@ class JsonlSink(SignalSink):
         target_dir = self.ready_root / symbol
         target_dir.mkdir(parents=True, exist_ok=True)
         target_file = target_dir / f"signals_{minute}.jsonl"
-        # 调试：在序列化前再次确保run_id存在（使用之前读取的run_id_env）
-        if "run_id" not in entry:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"[JsonlSink] 序列化前run_id缺失！entry keys: {list(entry.keys())}, RUN_ID env: {run_id_env}")
-            entry["run_id"] = run_id_env if run_id_env else ""
-        # 再次从环境变量读取（防止之前的值被覆盖）
-        current_run_id = os.getenv("RUN_ID", "")
-        if current_run_id:
-            entry["run_id"] = current_run_id
-        elif "run_id" not in entry:
-            entry["run_id"] = ""
+        
         # P0: 添加水印字段，用于验证是否使用了CORE_ALGO的JsonlSink
         entry.setdefault("_writer", "core_jsonl_v406")
+        
         serialized = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
-        # 调试：验证序列化后的JSON是否包含run_id
-        if '"run_id"' not in serialized:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"[JsonlSink] 序列化后run_id缺失！entry keys: {list(entry.keys())}, RUN_ID env: {current_run_id}, serialized: {serialized[:200]}")
-            # 强制添加run_id字段
-            entry["run_id"] = current_run_id if current_run_id else ""
-            serialized = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
         
         # P0: 按批次 fsync，兼顾数据安全与性能
         # P1: 注意：_write_count 跨文件累积，fsync 发生在当次目标文件句柄上
+        # P0: JSONL rotate时确保最后一次fsync（在文件关闭前检查_write_count）
+        # 跟踪上一个文件，在文件切换时fsync上一个文件
+        prev_minute = getattr(self, '_last_minute', None)
+        current_minute = minute
+        
         with target_file.open("a", encoding="utf-8") as fp:
             fp.write(serialized + "\n")
             self._write_count += 1
+            
             # 每 N 次写入执行一次 fsync
             if self._write_count >= self.fsync_every_n:
                 fp.flush()
@@ -179,7 +175,30 @@ class JsonlSink(SignalSink):
             else:
                 # 仍然 flush，但不 fsync（减少系统调用）
                 fp.flush()
+            
+            # P0: 在文件关闭前，如果_write_count>0（无论是否达到阈值），都要fsync
+            # 这确保rotate时最后一批数据也能fsync（避免只flush未fsync）
+            # 注意：如果_write_count >= fsync_every_n，已经在上面fsync并重置为0了
+            # 所以这里只需要处理 > 0 且 < fsync_every_n 的情况
+            # 但实际上，由于文件句柄在with语句结束后关闭，我们需要在关闭前fsync
+            # 如果_write_count > 0，说明还有未fsync的数据，需要fsync
+            if self._write_count > 0:
+                # 文件即将关闭，确保最后一批数据fsync
+                fp.flush()
+                os.fsync(fp.fileno())
+                self._write_count = 0
+        
+        self._last_minute = current_minute
 
+    def close(self) -> None:
+        """P0: 关闭时清理状态"""
+        # 由于JsonlSink每次emit都打开和关闭文件，且在文件关闭前已fsync
+        # 这里只需要清理状态
+        if self._write_count > 0:
+            logger.warning(f"[JsonlSink] 关闭时检测到未fsync的写入计数: {self._write_count}（应在emit中处理）")
+        self._write_count = 0
+        self._last_minute = None
+    
     def get_health(self) -> Dict[str, Any]:
         return {"kind": "jsonl", "base_dir": str(self.base_dir)}
 
@@ -196,6 +215,10 @@ class SqliteSink(SignalSink):
         base_dir = Path(base_dir)
         base_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = base_dir / "signals.db"
+        
+        # P0.5: 启动时打印最终生效的批量参数，便于复现与比对
+        logger.info(f"[SqliteSink] 批量参数: batch_n={batch_n}, flush_ms={flush_ms}ms")
+        
         self.conn = sqlite3.connect(self.db_path)
         # P1: SQLite 性能优化，减少"吞吐差"
         # 启用 WAL 模式、降低同步级别、使用内存临时存储、增大缓存
@@ -542,7 +565,8 @@ class SqliteSink(SignalSink):
                     logger.warning(f"[SqliteSink] WAL检查点失败: {e}")
                 
                 self.conn.close()
-                logger.info(f"[SqliteSink] 数据库连接已关闭（已刷新{queue_size}条数据）")
+                # P0: SQLite关闭路径再确认：先刷剩余批次→checkpoint→close，并打印实际flush数
+                logger.info(f"[SqliteSink] 关闭完成：已刷新剩余批次{queue_size}条数据，WAL检查点已执行，数据库连接已关闭")
         except Exception as e:
             logger.error(f"[SqliteSink] 关闭时出错: {e}", exc_info=True)
 
@@ -557,11 +581,10 @@ class MultiSink(SignalSink):
         self.sinks = sinks
     
     def emit(self, entry: Dict[str, Any]) -> None:
-        # P0: 固定MultiSink顺序与数据一致性（浅拷贝entry，避免子sink修改影响）
-        # 确保所有子sink都只读entry，不要修改字段
-        entry_copy = entry.copy()
+        # P0: 固定MultiSink顺序与数据一致性（每个子Sink独立副本，避免字段被"串改"）
+        # 在循环内copy，确保每个子Sink都有独立的entry副本
         for sink in self.sinks:
-            sink.emit(entry_copy)
+            sink.emit(entry.copy())
     
     def close(self) -> None:
         """TASK-07A: 确保所有Sink正确关闭（只调用标准接口，不访问私有属性）"""
@@ -782,7 +805,11 @@ class CoreAlgorithm:
             signal_type = "pending"
 
         # P0: 从环境变量读取run_id，添加到decision中用于按run_id对账
+        # P1: 统一run_id贯穿JSONL/SQLite，确保JSONL包含所有必需字段（signal_type、created_at）
         run_id = os.getenv("RUN_ID", "")
+        # P1: 添加created_at字段，与SQLite的created_at对齐
+        from datetime import datetime, timezone
+        created_at = datetime.now(timezone.utc).isoformat()
         decision = {
             "ts_ms": ts_ms,
             "symbol": symbol,
@@ -796,6 +823,7 @@ class CoreAlgorithm:
             "signal_type": signal_type,
             "guard_reason": ",".join(gating_reasons) if gating_reasons else None,  # 保存所有原因（逗号分隔）
             "run_id": run_id,
+            "created_at": created_at,  # P1: 与SQLite的created_at对齐
         }
 
         if confirm:
