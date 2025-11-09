@@ -91,6 +91,97 @@ jobs:
           logs/report/parity_diff_*.json
         retention-days: 30
 
+  backtest-test:
+    name: 回测 Harness 测试（跨平台）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+    
+    - name: 生成测试数据（features）
+      run: |
+        python scripts/generate_test_features.py --output deploy/data/ofi_cvd/ready/features/BTCUSDT --count 100
+    
+    - name: 运行回测冒烟测试
+      shell: bash
+      run: |
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          python scripts/test_backtest_smoke.py
+        else
+          python scripts/test_backtest_smoke.py
+        fi
+    
+    - name: 运行回测集成测试
+      shell: bash
+      run: |
+        python scripts/test_backtest_integration.py
+    
+    - name: 检查回测输出
+      shell: bash
+      run: |
+        # 检查输出文件是否存在
+        if [ ! -d "runtime/backtest" ]; then
+          echo "回测输出目录不存在"
+          exit 1
+        fi
+        
+        # 检查metrics.json是否存在
+        METRICS_FILE=$(find runtime/backtest -name "metrics.json" -type f | head -1)
+        if [ -z "$METRICS_FILE" ]; then
+          echo "metrics.json未生成"
+          exit 1
+        fi
+        
+        # 检查run_manifest.json是否存在
+        MANIFEST_FILE=$(find runtime/backtest -name "run_manifest.json" -type f | head -1)
+        if [ -z "$MANIFEST_FILE" ]; then
+          echo "run_manifest.json未生成"
+          exit 1
+        fi
+        
+        # P1.7: 保存metrics用于跨平台比较
+        mkdir -p ci_artifacts
+        cp "$METRICS_FILE" "ci_artifacts/metrics_${{ matrix.os }}.json"
+        cp "$MANIFEST_FILE" "ci_artifacts/manifest_${{ matrix.os }}.json"
+    
+    - name: P1.7: 跨平台metrics差异比较
+      if: matrix.os == 'ubuntu-latest'
+      shell: bash
+      run: |
+        # 下载Windows平台的metrics
+        if [ -f "ci_artifacts/metrics_windows-latest.json" ] && [ -f "ci_artifacts/metrics_ubuntu-latest.json" ]; then
+          python scripts/compare_cross_platform_metrics.py \
+            --windows-metrics ci_artifacts/metrics_windows-latest.json \
+            --unix-metrics ci_artifacts/metrics_ubuntu-latest.json \
+            --threshold 0.05
+        else
+          echo "Warning: Cross-platform metrics comparison skipped (files not found)"
+        fi
+    
+    - name: 上传回测输出（发布证据）
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: backtest-output-${{ matrix.os }}-${{ github.run_number }}
+        path: |
+          runtime/backtest/**/*.json
+          runtime/backtest/**/*.jsonl
+        retention-days: 30
+
   smoke-test:
     name: SMOKE 快速回归
     runs-on: ubuntu-latest

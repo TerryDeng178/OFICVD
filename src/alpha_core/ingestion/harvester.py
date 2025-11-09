@@ -459,22 +459,34 @@ class SuccessOFICVDHarvester:
             # 向后兼容：从环境变量读取
             self.symbols = symbols or os.getenv('SYMBOLS', 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT').split(',')
             
-            # 兼容 env 模式默认路径改为基于 deploy_root
+            # P1: 使用集中式路径常量（兼容模式也走 data/ofi_cvd/{raw,preview}）
+            from alpha_core.common.paths import resolve_roots
+            roots = resolve_roots(self.project_root)
+            
             if output_dir is None:
-                output_dir = os.getenv('OUTPUT_DIR', str(self.deploy_root / "data" / "ofi_cvd"))
+                output_dir = os.getenv('OUTPUT_DIR', str(roots["RAW_ROOT"]))
             self.output_dir = Path(output_dir)
+            # 确保 output_dir 指向 raw 层级
+            if not str(self.output_dir).endswith("raw") and not str(self.output_dir).endswith("ofi_cvd"):
+                if str(self.output_dir).endswith("ofi_cvd"):
+                    self.output_dir = roots["RAW_ROOT"]
+                else:
+                    self.output_dir = roots["RAW_ROOT"]
             
             preview_dir_env = os.getenv('PREVIEW_DIR')
             if preview_dir_env:
                 self.preview_dir = Path(preview_dir_env)
             else:
-                self.preview_dir = self.deploy_root / "preview" / "ofi_cvd"
+                self.preview_dir = roots["PREVIEW_ROOT"]
+            # 确保 preview_dir 指向 preview 层级
+            if not str(self.preview_dir).endswith("preview"):
+                self.preview_dir = roots["PREVIEW_ROOT"]
             
             artifacts_dir_env = os.getenv('ARTIFACTS_DIR')
             if artifacts_dir_env:
                 self.artifacts_dir = Path(artifacts_dir_env)
             else:
-                self.artifacts_dir = self.deploy_root / "artifacts" / "ofi_cvd"
+                self.artifacts_dir = roots["ARTIFACTS_ROOT"]
             
             # 从环境变量读取所有配置
             self.buffer_high = {
@@ -524,11 +536,11 @@ class SuccessOFICVDHarvester:
             self.w_cvd = float(_env('W_CVD', '0.4'))
             self.fusion_cal_k = float(_env('FUSION_CAL_K', '1.0'))
             
-            # 初始化 PathBuilder（统一路径构造器）
+            # P1: 初始化 PathBuilder（使用集中式路径常量）
             from alpha_core.ingestion.path_utils import PathBuilder
             self.path_builder = PathBuilder(
-                data_root=str(self.deploy_root / "data" / "ofi_cvd"),
-                artifacts_root=str(self.deploy_root / "artifacts" / "ofi_cvd"),
+                data_root=str(roots["DATA_ROOT"]),
+                artifacts_root=str(roots["ARTIFACTS_ROOT"]),
                 tzname="UTC"
             )
             # 使用已有的 writerid（如果已生成）或使用 PathBuilder 的 writerid
@@ -583,11 +595,21 @@ class SuccessOFICVDHarvester:
                         f"output_dir={self.output_dir}, preview_dir={self.preview_dir}, "
                         f"artifacts_dir={self.artifacts_dir}")
             
-            # 初始化 PathBuilder（统一路径构造器）
+            # P1: 使用集中式路径常量
+            from alpha_core.common.paths import resolve_roots
+            roots = resolve_roots(self.project_root)
+            # 确保路径与集中式常量对齐
+            if not str(self.output_dir).endswith("raw"):
+                self.output_dir = roots["RAW_ROOT"]
+            if not str(self.preview_dir).endswith("preview"):
+                self.preview_dir = roots["PREVIEW_ROOT"]
+            self.artifacts_dir = roots["ARTIFACTS_ROOT"]
+            
+            # P1: 初始化 PathBuilder（使用集中式路径常量）
             from alpha_core.ingestion.path_utils import PathBuilder
             self.path_builder = PathBuilder(
-                data_root=str(self.deploy_root / "data" / "ofi_cvd"),
-                artifacts_root=str(self.deploy_root / "artifacts" / "ofi_cvd"),
+                data_root=str(roots["DATA_ROOT"]),
+                artifacts_root=str(roots["ARTIFACTS_ROOT"]),
                 tzname="UTC"
             )
             # 使用已有的 writerid（如果已生成）或使用 PathBuilder 的 writerid
@@ -971,38 +993,32 @@ class SuccessOFICVDHarvester:
             logger.error(f"[DEADLETTER] 写入失败 {symbol}-{kind}: {e}")
     
     def _create_directory_structure(self):
-        """创建目录结构"""
-        # 先创建 /deploy 与三套固定子目录（幂等）
+        """创建目录结构（P0: 统一路径口径，移除独立的preview树）"""
+        # 先创建 /deploy 根目录（幂等）
         self.deploy_root.mkdir(parents=True, exist_ok=True)
         logger.info(f"创建 deploy 根目录: {self.deploy_root}")
         
-        # 创建固定的子目录结构（幂等）
-        data_base = self.deploy_root / "data"
-        preview_base = self.deploy_root / "preview"
-        artifacts_base = self.deploy_root / "artifacts"
+        # P0: 只创建 deploy/data/ofi_cvd/{raw,preview} 和 deploy/artifacts/ofi_cvd
+        # 不再创建独立的 deploy/preview/ofi_cvd 树
+        data_base = self.deploy_root / "data" / "ofi_cvd"
+        artifacts_base = self.deploy_root / "artifacts" / "ofi_cvd"
         
-        data_base.mkdir(parents=True, exist_ok=True)
-        preview_base.mkdir(parents=True, exist_ok=True)
+        # 创建统一的数据目录结构（raw 和 preview 都在 data/ofi_cvd 下）
+        for layer in ("raw", "preview"):
+            (data_base / layer).mkdir(parents=True, exist_ok=True)
+        logger.debug(f"创建统一数据目录结构: {data_base}/raw 和 /preview")
+        
+        # 创建 artifacts 目录结构
         artifacts_base.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"创建固定子目录: data={data_base}, preview={preview_base}, artifacts={artifacts_base}")
+        for subdir in ("run_logs", "dq_reports", "deadletter"):
+            (artifacts_base / subdir).mkdir(parents=True, exist_ok=True)
+        logger.debug(f"创建 artifacts 子目录: {artifacts_base}")
         
-        # 确保 ofi_cvd 子目录存在
-        (data_base / "ofi_cvd").mkdir(parents=True, exist_ok=True)
-        (preview_base / "ofi_cvd").mkdir(parents=True, exist_ok=True)
-        (artifacts_base / "ofi_cvd").mkdir(parents=True, exist_ok=True)
-        logger.debug("创建 ofi_cvd 子目录")
-        
-        # 创建 artifacts 的固定子目录
-        (self.artifacts_dir / "run_logs").mkdir(parents=True, exist_ok=True)
-        (self.artifacts_dir / "dq_reports").mkdir(parents=True, exist_ok=True)
-        (self.artifacts_dir / "deadletter").mkdir(parents=True, exist_ok=True)
-        logger.debug(f"创建 artifacts 子目录: {self.artifacts_dir}")
-        
-        # 创建统一目录结构：{data_root}/{layer}（raw/preview）
+        # 兼容：如果 path_builder 存在，也确保其目录结构一致
         if hasattr(self, 'path_builder'):
             for layer in ("raw", "preview"):
                 (self.path_builder.data_root / layer).mkdir(parents=True, exist_ok=True)
-            logger.debug(f"创建统一目录结构: {self.path_builder.data_root}/raw 和 /preview")
+            logger.debug(f"PathBuilder 目录结构已同步: {self.path_builder.data_root}/raw 和 /preview")
         
         # 再创建日期分区（使用UTC时间确保与数据分区一致）
         today_utc = datetime.utcnow().strftime("%Y-%m-%d")

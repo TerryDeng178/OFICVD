@@ -1,0 +1,84 @@
+# -*- coding: utf-8 -*-
+# Backtest Configuration
+# TASK-08: 回放+回测 Harness 配置文件
+
+signal:
+  sink: jsonl  # jsonl | sqlite | null
+  output_dir: ./runtime
+  replay_mode: 1  # Always 1 for backtest
+
+components:
+  fusion:
+    w_ofi: 0.6
+    w_cvd: 0.4
+  cvd:
+    winsor_limit: 2.0
+
+strategy:
+  mode: active  # auto | active | quiet (default: active for backtest)
+
+risk:
+  gates:
+    max_spread_bps: 2.5
+    max_lag_sec: 0.5
+    require_activity: true
+
+# 代码.4: Aligner门限配置（支持环境变量覆盖）
+aligner:
+  lag_threshold_ms: 5000  # 用于标记lag_bad的阈值（毫秒）
+  spread_threshold: 2.0    # 用于scenario_2x2判断的spread阈值（bps）
+  volatility_threshold: 5.0  # 用于scenario_2x2判断的波动阈值（bps）
+
+# P1-2: Reader去重桶保留时长配置（支持环境变量覆盖）
+reader:
+  dedup_keep_hours: 2  # 去重桶保留时长（小时），默认2小时
+
+backtest:
+  taker_fee_bps: 2.0  # Taker fee in basis points
+  slippage_bps: 1.0   # Slippage in basis points
+  notional_per_trade: 1000  # Fixed notional per trade
+  reverse_on_signal: false  # Reverse position on opposite signal
+  take_profit_bps: null  # Optional take profit (basis points)
+  stop_loss_bps: null   # Optional stop loss (basis points)
+  min_hold_time_sec: null  # Optional minimum hold time (seconds)
+  ignore_gating_in_backtest: true  # P1: 默认绕过闸门（用于纯策略收益评估），但仍统计gate原因分布
+  rollover_timezone: "UTC"  # P1增强: PnL日切口径（UTC vs 本地），支持Asia/Tokyo等
+  rollover_hour: 0  # P1增强: 自定义rollover小时（0-23），0表示使用日期边界
+  
+  # P1.3增强: 滑点/费用情境化模型
+  slippage_model: "static"  # Options: static, linear, piecewise
+  fee_model: "taker_static"  # Options: taker_static, tiered, maker_taker
+  
+  # P1.3: 情境化滑点piecewise配置（scenario_2x2 → 滑点bps曲线）
+  slippage_piecewise:
+    # 场景映射: {紧/宽 × 静/动} → 滑点倍数
+    # A_H: 紧+动 (Active + High volatility) - 高滑点
+    # A_L: 紧+静 (Active + Low volatility) - 中等滑点
+    # Q_H: 宽+动 (Quiet + High volatility) - 高滑点
+    # Q_L: 宽+静 (Quiet + Low volatility) - 低滑点
+    scenario_multipliers:
+      A_H: 1.5  # 高波动场景增加50%滑点
+      A_L: 1.0  # 正常滑点
+      Q_H: 1.5  # 高波动场景增加50%滑点
+      Q_L: 0.8  # 低波动场景减少20%滑点
+    # 基于spread的滑点基数（bps）
+    spread_base_multiplier: 1.0  # spread_bps * multiplier作为基础滑点
+  
+  # P1.3: 情境化费用tiered配置（fee_tier → Maker/Taker费率表）
+  fee_tiered:
+    # 费率层级映射: {TM/TK/MM/MK} → fee_bps
+    # TM: Taker Maker (买入taker, 卖出maker)
+    # TK: Taker Taker (双向taker)
+    # MM: Maker Maker (双向maker)
+    # MK: Maker Taker (买入maker, 卖出taker)
+    tier_mapping:
+      TM: 2.0  # Taker Maker: 默认taker费率
+      TK: 2.0  # Taker Taker: 默认taker费率
+      MM: 1.0  # Maker Maker: 假设maker费率更低（50%）
+      MK: 1.0  # Maker Taker: 假设maker费率更低（50%）
+
+# Input/output paths
+paths:
+  input_dir: ./deploy/data/ofi_cvd
+  output_dir: ./runtime/backtest
+

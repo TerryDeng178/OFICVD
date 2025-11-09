@@ -1,0 +1,53 @@
+name: pnl-rollover-timezone-regression
+
+on:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  pnl-rollover-tz-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        timezone: [UTC, Asia/Tokyo]
+        test_case: [cross_timezone, cross_month, cross_year, weekend]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytz pytest
+      
+      - name: Run PnL rollover tests
+        env:
+          ROLLOVER_TZ: ${{ matrix.timezone }}
+        run: |
+          # P1-4: 运行不同的切日用例
+          case=${{ matrix.test_case }}
+          if [ "$case" = "cross_timezone" ]; then
+            python -m pytest tests/test_pnl_rollover_boundaries.py::TestPnLRolloverBoundaries::test_cross_timezone_consistency -v
+          elif [ "$case" = "cross_month" ]; then
+            python -m pytest tests/test_pnl_rollover_boundaries.py::TestPnLRolloverBoundaries::test_cross_month_boundary -v
+          elif [ "$case" = "cross_year" ]; then
+            python -m pytest tests/test_pnl_rollover_boundaries.py::TestPnLRolloverBoundaries::test_cross_year_boundary -v
+          elif [ "$case" = "weekend" ]; then
+            python -m pytest tests/test_pnl_rollover_boundaries.py::TestPnLRolloverBoundaries::test_weekend_boundary -v
+          fi
+      
+      - name: Verify timezone consistency
+        run: |
+          # 验证时区配置正确应用
+          python -c "
+import os
+tz = os.getenv('ROLLOVER_TZ', 'UTC')
+print(f'Testing with timezone: {tz}')
+assert tz in ['UTC', 'Asia/Tokyo'], f'Invalid timezone: {tz}'
+          "
+
+

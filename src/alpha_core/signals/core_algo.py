@@ -208,7 +208,13 @@ class JsonlSink(SignalSink):
         self._last_minute = None
     
     def get_health(self) -> Dict[str, Any]:
-        return {"kind": "jsonl", "base_dir": str(self.base_dir)}
+        """P1: 返回健康度指标（目前JsonlSink无队列，返回基础信息）"""
+        return {
+            "kind": "jsonl",
+            "base_dir": str(self.base_dir),
+            "queue_size": 0,  # JsonlSink无队列
+            "dropped_count": 0,  # JsonlSink无dropped计数
+        }
 
 
 class SqliteSink(SignalSink):
@@ -312,6 +318,8 @@ class SqliteSink(SignalSink):
         self.batch_n = batch_n
         self.flush_ms = flush_ms
         self._batch_queue: List[tuple] = []
+        # P1: 添加dropped计数（用于健康度指标）
+        self._dropped_count = 0
         # TASK-07B: 初始化_last_flush_time为0，确保第一次emit时立即刷新（如果flush_ms>0）
         # 如果flush_ms=0，会在emit中特殊处理
         self._last_flush_time = 0.0  # 初始化为0，确保第一次刷新立即触发
@@ -549,6 +557,8 @@ class SqliteSink(SignalSink):
                 logger.error(f"[SqliteSink] 写入补偿文件失败: {save_e}", exc_info=True)
             
             # 清空队列（已保存到补偿文件）
+            # P1: 记录dropped计数
+            self._dropped_count += batch_size
             self._batch_queue.clear()
     
     def close(self) -> None:
@@ -579,7 +589,15 @@ class SqliteSink(SignalSink):
             logger.error(f"[SqliteSink] 关闭时出错: {e}", exc_info=True)
 
     def get_health(self) -> Dict[str, Any]:
-        return {"kind": "sqlite", "path": str(self.db_path)}
+        """P1: 返回健康度指标（queue_size, dropped_count）"""
+        with self._lock:
+            queue_size = len(self._batch_queue)
+        return {
+            "kind": "sqlite",
+            "path": str(self.db_path),
+            "queue_size": queue_size,
+            "dropped_count": self._dropped_count,
+        }
 
 
 class MultiSink(SignalSink):

@@ -34,6 +34,60 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _perform_startup_path_check(features_dir: Path, input_mode: str, roots: Dict[str, Path]) -> None:
+    """P1: 启动期路径自检
+    
+    Args:
+        features_dir: 特征目录路径
+        input_mode: 输入模式（raw/preview）
+        roots: 路径根目录字典
+    """
+    if not features_dir.exists():
+        logger.warning(
+            f"[signal.input] 路径不存在: {features_dir}. "
+            f"Harvester 兼容模式请确保写入 {roots['RAW_ROOT' if input_mode == 'raw' else 'PREVIEW_ROOT']}"
+        )
+        logger.info(
+            f"[signal.input] 建议: "
+            f"1. 确认 Harvester 是否写入 {roots['RAW_ROOT' if input_mode == 'raw' else 'PREVIEW_ROOT']}; "
+            f"2. 若是历史回放，请先把数据放到 {roots['RAW_ROOT' if input_mode == 'raw' else 'PREVIEW_ROOT']}; "
+            f"3. 或设置 V13_INPUT_DIR 指向正确目录"
+        )
+        return
+    
+    # 列出前3个Parquet文件的相对路径和最近修改时间
+    parquet_files = sorted(features_dir.rglob("*.parquet"), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
+    jsonl_files = sorted(features_dir.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
+    
+    if not parquet_files and not jsonl_files:
+        logger.warning(
+            f"[signal.input] 路径为空: {features_dir}. "
+            f"确认 Harvester 是否写入 {roots['RAW_ROOT' if input_mode == 'raw' else 'PREVIEW_ROOT']}"
+        )
+        logger.info(
+            f"[signal.input] 建议: "
+            f"1. 确认 Harvester 是否写入 {roots['RAW_ROOT' if input_mode == 'raw' else 'PREVIEW_ROOT']}; "
+            f"2. 若是历史回放，请先把数据放到 {roots['RAW_ROOT' if input_mode == 'raw' else 'PREVIEW_ROOT']}; "
+            f"3. 或设置 V13_INPUT_DIR 指向正确目录"
+        )
+        return
+    
+    # 显示前3个文件的相对路径和修改时间
+    logger.info(f"[signal.input] 路径自检通过: {features_dir}")
+    if parquet_files:
+        logger.info(f"[signal.input] 找到 {len(list(features_dir.rglob('*.parquet')))} 个Parquet文件，示例:")
+        for i, pf in enumerate(parquet_files, 1):
+            rel_path = pf.relative_to(features_dir)
+            mtime = datetime.fromtimestamp(pf.stat().st_mtime)
+            logger.info(f"  {i}. {rel_path} (修改时间: {mtime.strftime('%Y-%m-%d %H:%M:%S')})")
+    if jsonl_files:
+        logger.info(f"[signal.input] 找到 {len(list(features_dir.rglob('*.jsonl')))} 个JSONL文件，示例:")
+        for i, jf in enumerate(jsonl_files[:3], 1):
+            rel_path = jf.relative_to(features_dir)
+            mtime = datetime.fromtimestamp(jf.stat().st_mtime)
+            logger.info(f"  {i}. {rel_path} (修改时间: {mtime.strftime('%Y-%m-%d %H:%M:%S')})")
+
+
 @dataclass
 class ProcessSpec:
     """进程规格描述"""
@@ -2150,12 +2204,24 @@ def build_process_specs(
     
     # 特征文件目录（支持 preview/raw 切换，优先环境变量，默认 preview）
     input_mode = os.getenv("V13_INPUT_MODE", "preview")  # preview | raw
-    input_dir_env = os.getenv("V13_INPUT_DIR", "")
     
+    # P0: 验证 input_mode 只允许 raw 或 preview
+    if input_mode not in ("raw", "preview"):
+        logger.error(f"[signal.input] Invalid V13_INPUT_MODE: {input_mode}. Must be 'raw' or 'preview'")
+        raise ValueError(f"V13_INPUT_MODE must be 'raw' or 'preview', got: {input_mode}")
+    
+    # P1: 使用集中式路径常量
+    from alpha_core.common.paths import get_data_root, resolve_roots
+    roots = resolve_roots(project_root)
+    
+    input_dir_env = os.getenv("V13_INPUT_DIR", "")
     if input_dir_env:
         features_dir = Path(input_dir_env)
     else:
-        features_dir = project_root / "deploy" / "data" / "ofi_cvd" / input_mode
+        features_dir = get_data_root(input_mode)
+    
+    # P1: 启动期路径自检（列出前3个文件 + 诊断信息）
+    _perform_startup_path_check(features_dir, input_mode, roots)
     
     logger.info(f"[signal.input] mode={input_mode} dir={features_dir}")
     
@@ -2438,11 +2504,24 @@ async def main_async(args):
                 
                 # P1: features_manifest（输入目录/文件指纹摘要）
                 input_mode = os.getenv("V13_INPUT_MODE", "preview")
+                
+                # P0: 验证 input_mode
+                if input_mode not in ("raw", "preview"):
+                    logger.warning(f"[source_manifest] Invalid V13_INPUT_MODE: {input_mode}, using 'preview'")
+                    input_mode = "preview"
+                
+                # P1: 使用集中式路径常量
+                from alpha_core.common.paths import get_data_root, resolve_roots
+                roots = resolve_roots(project_root)
+                
                 input_dir_env = os.getenv("V13_INPUT_DIR", "")
                 if input_dir_env:
                     features_dir = Path(input_dir_env)
                 else:
-                    features_dir = project_root / "deploy" / "data" / "ofi_cvd" / input_mode
+                    features_dir = get_data_root(input_mode)
+                
+                # P1: 启动期路径自检
+                _perform_startup_path_check(features_dir, input_mode, roots)
                 
                 if features_dir.exists():
                     # 收集 Parquet 和 JSONL 文件的前几个作为指纹
@@ -2541,12 +2620,29 @@ async def main_async(args):
                 # P1: LIVE/preview标识与输入目录收敛
                 # 报告里把"数据源模式（raw/preview）、--watch开启与否、特征目录路径"三者一起写入source_manifest
                 input_mode = env_overrides.get("V13_INPUT_MODE", "preview")
+                
+                # P0: 验证 input_mode
+                if input_mode not in ("raw", "preview"):
+                    logger.warning(f"[run_manifest] Invalid V13_INPUT_MODE: {input_mode}, using 'preview'")
+                    input_mode = "preview"
+                
                 replay_mode = env_overrides.get("V13_REPLAY_MODE", "0") == "1"
                 is_replay_mode = replay_mode or config_path.name.startswith("replay")
                 # P1: 判断--watch是否开启（LIVE模式开启，回放模式关闭）
                 watch_enabled = not is_replay_mode
+                # P1: 使用集中式路径常量
+                from alpha_core.common.paths import get_data_root, resolve_roots
+                roots = resolve_roots(project_root)
+                
                 # P1: 获取特征目录路径
-                features_dir = project_root / "deploy" / "data" / "ofi_cvd" / input_mode
+                input_dir_env = env_overrides.get("V13_INPUT_DIR")
+                if input_dir_env:
+                    features_dir = Path(input_dir_env)
+                else:
+                    features_dir = get_data_root(input_mode)
+                
+                # P1: 启动期路径自检
+                _perform_startup_path_check(features_dir, input_mode, roots)
                 
                 source_manifest = {
                     "run_id": manifest["run_id"],

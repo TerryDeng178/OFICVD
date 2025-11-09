@@ -1,0 +1,80 @@
+name: pushgateway-integration-test
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  pushgateway-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytz requests  # For timezone and Pushgateway support
+      
+      - name: Start Pushgateway
+        run: |
+          # Download and start Pushgateway
+          wget https://github.com/prometheus/pushgateway/releases/download/v1.7.0/pushgateway-1.7.0.linux-amd64.tar.gz
+          tar -xzf pushgateway-1.7.0.linux-amd64.tar.gz
+          ./pushgateway-1.7.0.linux-amd64/pushgateway &
+          sleep 5  # Wait for Pushgateway to start
+          echo "Pushgateway started on port 9091"
+      
+      - name: Verify Pushgateway is running
+        run: |
+          curl -f http://localhost:9091/metrics || exit 1
+          echo "Pushgateway is running"
+      
+      - name: Run backtest with Pushgateway enabled
+        env:
+          TIMESERIES_ENABLED: "1"
+          TIMESERIES_TYPE: "prometheus"
+          TIMESERIES_URL: "http://localhost:9091"
+          RUN_ID: "ci-test-${{ github.sha }}"
+          BACKTEST_SYMBOL: "BTCUSDT"
+          BACKTEST_SESSION: "all"
+        run: |
+          # Create output directory
+          mkdir -p runs/${RUN_ID}
+          
+          # Run backtest (use minimal data for CI)
+          python scripts/replay_harness.py \
+            --input ./deploy/data/ofi_cvd \
+            --kinds features \
+            --symbols BTCUSDT \
+            --minutes 2 \
+            --output ./runs/${RUN_ID} || true
+      
+      - name: Verify metrics pushed to Pushgateway
+        run: |
+          python scripts/test_pushgateway_integration.py \
+            --pushgateway-url http://localhost:9091 \
+            --run-id ci-test-${{ github.sha }} \
+            --expected-metrics 11
+      
+      - name: Capture Pushgateway metrics snapshot
+        if: always()
+        run: |
+          curl -s http://localhost:9091/metrics > pushgateway_metrics_snapshot.txt || true
+          echo "Metrics snapshot saved"
+      
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pushgateway-test-results
+          path: |
+            pushgateway_metrics_snapshot.txt
+            runs/ci-test-*/
+          if-no-files-found: warn
+

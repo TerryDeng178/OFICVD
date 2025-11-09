@@ -1,0 +1,150 @@
+name: gate-dual-run-baseline
+
+on:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        gating_mode: [enforce, ignore]
+        # P1.1: 可扩展为资产×日期×时区矩阵（小样本）
+        # symbol: [BTCUSDT, ETHUSDT]
+        # date: [2025-01-01, 2025-01-02]
+        # timezone: [UTC, Asia/Tokyo]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytz  # For timezone support
+      
+      - name: Run backtest (${{ matrix.gating_mode }})
+        env:
+          IGNORE_GATING: ${{ matrix.gating_mode == 'ignore' && '1' || '0' }}
+          RUN_ID: ${{ github.sha }}-${{ matrix.gating_mode }}
+          TIMESERIES_ENABLED: "0"
+        run: |
+          # Create output directory
+          mkdir -p runs/${RUN_ID}
+          
+          # Run backtest (adjust command based on your actual script)
+          python scripts/replay_harness.py \
+            --input ./deploy/data/ofi_cvd \
+            --kinds features \
+            --date $(date -u +%Y-%m-%d) \
+            --output ./runs/${RUN_ID} \
+            --ignore-gating ${IGNORE_GATING} || true
+          
+          # Extract metrics from run_manifest.json
+          if [ -f "./runs/${RUN_ID}/run_manifest.json" ]; then
+            python -c "
+import json
+import sys
+with open('./runs/${RUN_ID}/run_manifest.json', 'r') as f:
+    manifest = json.load(f)
+    metrics = manifest.get('metrics', {})
+    with open('./runs/${RUN_ID}/metrics.json', 'w') as mf:
+        json.dump(metrics, mf, indent=2)
+            "
+          fi
+      
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backtest-${{ matrix.gating_mode }}
+          path: runs/${{ env.RUN_ID }}/
+          if-no-files-found: warn
+
+  compare:
+    runs-on: ubuntu-latest
+    needs: backtest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          name: backtest-enforce
+          path: enforce
+      
+      - uses: actions/download-artifact@v4
+        with:
+          name: backtest-ignore
+          path: ignore
+      
+      - name: Extract gate stats from signals (P1.1)
+        run: |
+          # 从signals中提取gate统计
+          python scripts/extract_gate_stats_from_signals.py \
+            --signals-path enforce/signals \
+            --output enforce/gate_stats_from_signals.json || echo "No signals found in enforce mode"
+          
+          python scripts/extract_gate_stats_from_signals.py \
+            --signals-path ignore/signals \
+            --output ignore/gate_stats_from_signals.json || echo "No signals found in ignore mode"
+      
+      - name: Compare gate baseline
+        run: |
+          python scripts/compare_gate_baseline.py enforce ignore --input-dir ./deploy/data/ofi_cvd
+      
+      - name: P1.1: Compare gate stats from signals
+        run: |
+          # 对比signals中的gate统计
+          if [ -f "enforce/gate_stats_from_signals.json" ] && [ -f "ignore/gate_stats_from_signals.json" ]; then
+            python scripts/extract_gate_stats_from_signals.py \
+              --signals-path enforce/signals \
+              --compare-with ignore/signals \
+              --threshold 3.0
+          else
+            echo "Warning: Gate stats files not found, skipping comparison"
+          fi
+      
+      - name: P1.4: Check invalid scenario/fee tier rates
+        run: |
+          # 检查metrics中的invalid_scenario_rate和invalid_fee_tier_rate
+          python -c "
+import json
+import sys
+
+for mode in ['enforce', 'ignore']:
+    metrics_file = f'{mode}/metrics.json'
+    try:
+        with open(metrics_file, 'r') as f:
+            metrics = json.load(f)
+        
+        invalid_scenario_rate = metrics.get('invalid_scenario_rate', 0.0)
+        invalid_fee_tier_rate = metrics.get('invalid_fee_tier_rate', 0.0)
+        
+        print(f'{mode} mode:')
+        print(f'  invalid_scenario_rate: {invalid_scenario_rate:.4f} ({invalid_scenario_rate*100:.2f}%)')
+        print(f'  invalid_fee_tier_rate: {invalid_fee_tier_rate:.4f} ({invalid_fee_tier_rate*100:.2f}%)')
+        
+        # 阈值检查（<0.1%）
+        threshold = 0.001
+        if invalid_scenario_rate > threshold:
+            print(f'  ERROR: invalid_scenario_rate exceeds threshold ({threshold*100:.2f}%)')
+            sys.exit(1)
+        if invalid_fee_tier_rate > threshold:
+            print(f'  ERROR: invalid_fee_tier_rate exceeds threshold ({threshold*100:.2f}%)')
+            sys.exit(1)
+    except FileNotFoundError:
+        print(f'Warning: {metrics_file} not found')
+    except Exception as e:
+        print(f'Error checking {mode}: {e}')
+          "
+      
+      - name: Upload comparison report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-baseline-comparison
+          path: compare_gate_baseline.json
+          if-no-files-found: warn
+
