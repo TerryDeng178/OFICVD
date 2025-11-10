@@ -1,0 +1,81 @@
+# Stage1 一致性基线配置
+# 目标：在不动"策略参数"的前提下，完成四大一致性层的统一校准
+
+strategy_mode:
+  dynamic_enabled: false        # 一致性阶段固定模式
+  fixed_mode: "active"          # active | quiet | aggressive
+  activity:                     # 仅用于后续启用动态模式时的阈值参考
+    min_trades_per_min: 120
+    min_quote_updates_per_sec: 20
+  combine_logic: "OR"           # OR | AND（避免过苛导致假静默）
+
+guards:
+  # 活动度门：一致性阶段先关闭强制要求，避免"无活动"误伤
+  require_activity: false
+
+  # 事件延迟护栏：统一以 shadow 影子化运行，用于定位因果，不拦截确认
+  max_event_lag_sec:
+    value: 2.0
+    mode: "shadow"              # active | shadow
+
+  # 盘口价差护栏：保持 active，先校正 spread 计算与对齐
+  spread_bps_cap:
+    value: 8.0
+    mode: "active"
+
+  # 去重/冷却：一致性阶段保持基线值，不做优化，只验证是否过度/不足
+  dedup_window_ms: 250
+  cooldown_secs: 0.6
+
+replay:
+  enabled: true                 # 等价环境变量：V13_REPLAY_MODE=1
+  tz: "Asia/Tokyo"
+  cutover: "day"                # 切日口径与统计一致（可选 day/hour）
+
+sink:
+  type: "jsonl"                 # A/B 时可切 "null" 排除 I/O 干扰
+  out_dir: "./runtime"
+
+# 信号配置（保持基线值，不做优化）
+signal:
+  sink: jsonl
+  output_dir: ./runtime
+  replay_mode: 1
+  weak_signal_threshold: 0.2
+  consistency_min: 0.15
+  consistency_min_per_regime:
+    active: 0.10
+    quiet: 0.15
+  spread_bps_cap: 8.0
+  lag_cap_sec: 2.0
+  dedupe_ms: 250
+  thresholds:
+    active:
+      buy: 0.5
+      strong_buy: 1.0
+      sell: -0.5
+      strong_sell: -1.0
+    quiet:
+      buy: 0.7
+      strong_buy: 1.4
+      sell: -0.7
+      strong_sell: -1.4
+
+# 回测配置（最小化，仅用于一致性检查）
+backtest:
+  taker_fee_bps: 2.0
+  slippage_bps: 1.0
+  notional_per_trade: 1000
+  reverse_on_signal: false
+  take_profit_bps: 12
+  stop_loss_bps: 10
+  min_hold_time_sec: 45
+  force_timeout_exit: true
+  ignore_gating_in_backtest: false
+  rollover_timezone: UTC
+  rollover_hour: 0
+
+paths:
+  input_dir: ./deploy/data/ofi_cvd
+  output_dir: ./runtime
+

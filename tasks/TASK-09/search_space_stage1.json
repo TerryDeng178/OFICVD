@@ -1,0 +1,46 @@
+{
+  "stage": 1,
+  "description": "阶段1：稳胜率 + 控回撤 + 避免高频-低Edge",
+  "target": "win_rate ↑、max_drawdown ↔/↓、cost_ratio_notional ↓、trades_per_hour ↓、pnl_per_trade ↑",
+  "note": "搜索空间已优化：提高信号阈值、增强翻转冷却、强制启用门控，避免高频-低Edge坏形态",
+  "search_space": {
+    "signal.thresholds.active.buy": [0.85, 0.9, 0.95, 1.0, 1.1, 1.2],
+    "signal.thresholds.active.sell": [-1.2, -1.1, -1.0, -0.95, -0.9, -0.85],
+    "signal.weak_signal_threshold": [0.30, 0.35, 0.40, 0.45, 0.50],
+    "signal.consistency_min": [0.25, 0.30, 0.35, 0.40, 0.45],
+    "components.fusion.adaptive_cooldown_k": [0.5, 0.7, 1.0, 1.2, 1.5],
+    "components.fusion.flip_rearm_margin": [0.10, 0.15, 0.20, 0.25, 0.30],
+    "components.fusion.min_consecutive": [2, 3, 4],
+    "backtest.min_hold_time_sec": [30, 45, 60, 90, 120],
+    "backtest.force_timeout_exit": [true],
+    "backtest.ignore_gating_in_backtest": [false],
+    "backtest.fee_model": ["taker_static", "maker_taker"],
+    "backtest.slippage_model": ["static", "piecewise"],
+    "backtest.reverse_on_signal": [false]
+  },
+  "constraints": {
+    "min_hold_time_sec": {
+      "min": 90,
+      "description": "最小持有时长硬下限 ≥90s"
+    },
+    "scenario_thresholds": {
+      "A_H": {
+        "buy": [0.85, 0.9, 0.95],
+        "sell": [-0.95, -0.9, -0.85],
+        "description": "A_H场景更严（+1档）"
+      },
+      "Q_H": {
+        "buy": [0.85, 0.9, 0.95],
+        "sell": [-0.95, -0.9, -0.85],
+        "description": "Q_H场景更严（+1档）"
+      }
+    }
+  },
+  "scoring_weights": {
+    "win_rate": 0.4,
+    "max_drawdown": 0.3,
+    "cost_ratio_notional": 0.3,
+    "description": "评分权重偏向 win_rate / max_drawdown / cost_ratio_notional（注意：optimizer已使用win_rate_trades替代win_rate）"
+  }
+}
+

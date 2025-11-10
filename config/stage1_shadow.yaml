@@ -1,0 +1,62 @@
+# Stage1 影子护栏 A/B 对照配置（A组）
+# A组建议：锁定 active + 影子延迟 + null sink
+
+strategy_mode:
+  dynamic_enabled: false
+  fixed_mode: "active"
+  combine_logic: "OR"
+
+guards:
+  require_activity: false
+  max_event_lag_sec: { value: 2.0, mode: "shadow" }
+  spread_bps_cap: { value: 8.0, mode: "active" }
+  dedup_window_ms: 250
+  cooldown_secs: 0.6
+
+replay: { enabled: true, tz: "Asia/Tokyo", cutover: "day" }
+
+sink: { type: "null", out_dir: "./runtime" }
+
+# 信号配置（与stage1_consistency.yaml相同）
+signal:
+  sink: null
+  output_dir: ./runtime
+  replay_mode: 1
+  weak_signal_threshold: 0.2
+  consistency_min: 0.15
+  consistency_min_per_regime:
+    active: 0.10
+    quiet: 0.15
+  spread_bps_cap: 8.0
+  lag_cap_sec: 2.0
+  dedupe_ms: 250
+  thresholds:
+    active:
+      buy: 0.5
+      strong_buy: 1.0
+      sell: -0.5
+      strong_sell: -1.0
+    quiet:
+      buy: 0.7
+      strong_buy: 1.4
+      sell: -0.7
+      strong_sell: -1.4
+
+# 回测配置（最小化）
+backtest:
+  taker_fee_bps: 2.0
+  slippage_bps: 1.0
+  notional_per_trade: 1000
+  reverse_on_signal: false
+  take_profit_bps: 12
+  stop_loss_bps: 10
+  min_hold_time_sec: 45
+  force_timeout_exit: true
+  ignore_gating_in_backtest: false
+  rollover_timezone: UTC
+  rollover_hour: 0
+
+paths:
+  input_dir: ./deploy/data/ofi_cvd
+  output_dir: ./runtime
+

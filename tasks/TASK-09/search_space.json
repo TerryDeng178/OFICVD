@@ -1,0 +1,20 @@
+{
+  "fusion.thresholds.fuse_buy": [0.8, 1.0, 1.2],
+  "fusion.thresholds.fuse_sell": [-0.8, -1.0, -1.2],
+  "fusion.thresholds.regime.A_H.fuse_buy": [1.0, 1.2, 1.4],
+  "fusion.thresholds.regime.A_H.fuse_sell": [-1.0, -1.2, -1.4],
+  "fusion.thresholds.regime.Q_H.fuse_buy": [1.0, 1.2, 1.4],
+  "fusion.thresholds.regime.Q_H.fuse_sell": [-1.0, -1.2, -1.4],
+  "fusion.thresholds.regime.A_L.fuse_buy": [0.6, 0.8, 1.0],
+  "fusion.thresholds.regime.A_L.fuse_sell": [-0.6, -0.8, -1.0],
+  "fusion.thresholds.regime.Q_L.fuse_buy": [0.6, 0.8, 1.0],
+  "fusion.thresholds.regime.Q_L.fuse_sell": [-0.6, -0.8, -1.0],
+  "fusion.consistency.min_consistency": [0.15, 0.25, 0.35],
+  "fusion.weak_signal_threshold": [0.20, 0.30, 0.35],
+  "fusion.adaptive_cooldown_enabled": [true],
+  "fusion.adaptive_cooldown_k": [0.10, 0.20, 0.30],
+  "fusion.flip_rearm_margin": [0.00, 0.10, 0.20],
+  "fusion.burst_coalesce_ms": [0, 300, 600],
+  "fusion.min_warmup_samples": [50, 120, 240]
+}
+

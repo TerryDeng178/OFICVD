@@ -244,6 +244,11 @@ def main():
     if args.sink:
         signal_config["sink"] = {"kind": args.sink}
     
+    # P0: 传递components配置段（包含fusion参数）给ReplayFeeder
+    # 这样components.fusion参数（如flip_rearm_margin、adaptive_cooldown_k）才能正确传递到CoreAlgorithm
+    if "components" in config:
+        signal_config["components"] = config["components"]
+    
     # Handle sink config (can be string or dict)
     sink_config = signal_config.get("sink", "jsonl")
     if isinstance(sink_config, str):
@@ -308,8 +313,38 @@ def main():
             if ts_ms > 0:
                 last_data_ts_ms = ts_ms
             
+            # 字段名标准化：将ofi_z/cvd_z映射到z_ofi/z_cvd（兼容不同数据格式）
+            normalized_row = dict(feature_row)
+            if "ofi_z" in normalized_row and "z_ofi" not in normalized_row:
+                normalized_row["z_ofi"] = normalized_row["ofi_z"]
+            if "cvd_z" in normalized_row and "z_cvd" not in normalized_row:
+                normalized_row["z_cvd"] = normalized_row["cvd_z"]
+            
+            # 补充缺失字段的默认值（避免CoreAlgo警告和信号被阻止）
+            if "lag_sec" not in normalized_row or normalized_row.get("lag_sec") is None:
+                normalized_row["lag_sec"] = 0.0  # 默认无延迟
+            if "consistency" not in normalized_row or normalized_row.get("consistency") is None:
+                normalized_row["consistency"] = 1.0  # 默认完全一致
+            if "warmup" not in normalized_row or normalized_row.get("warmup") is None:
+                normalized_row["warmup"] = False  # False表示已完成warmup，可以交易（True表示正在warmup，会阻止信号）
+            if "spread_bps" not in normalized_row or normalized_row.get("spread_bps") is None:
+                normalized_row["spread_bps"] = 2.0  # 默认2.0 bps（合理值，避免spread检查失败）
+            
+            # P0修复: 注入固定lag_sec（用于强制触发lag检查）
+            signal_config = config.get("signal", {})
+            if signal_config.get("inject_lag_sec") is not None:
+                inject_lag = signal_config.get("inject_lag_sec")
+                normalized_row["lag_sec"] = inject_lag
+                logger.debug(f"[replay_harness] Injected lag_sec={inject_lag} for lag trigger test")
+            
+            # P0修复: 注入低consistency（用于强制触发consistency检查）
+            if signal_config.get("inject_low_consistency", False):
+                inject_consistency = signal_config.get("inject_consistency_value", 0.1)
+                normalized_row["consistency"] = inject_consistency
+                logger.debug(f"[replay_harness] Injected consistency={inject_consistency} for consistency trigger test")
+            
             # Feed to CORE_ALGO
-            signal = feeder.algo.process_feature_row(feature_row)
+            signal = feeder.algo.process_feature_row(normalized_row)
             if signal:
                 # P0-1: fast path也需要附加_feature_data（包含return_1s），确保情境化滑点/费用生效
                 if "_feature_data" not in signal:
@@ -369,8 +404,38 @@ def main():
             if ts_ms > 0:
                 last_data_ts_ms = ts_ms
             
+            # 字段名标准化：将ofi_z/cvd_z映射到z_ofi/z_cvd（兼容不同数据格式）
+            normalized_row = dict(feature_row)
+            if "ofi_z" in normalized_row and "z_ofi" not in normalized_row:
+                normalized_row["z_ofi"] = normalized_row["ofi_z"]
+            if "cvd_z" in normalized_row and "z_cvd" not in normalized_row:
+                normalized_row["z_cvd"] = normalized_row["cvd_z"]
+            
+            # 补充缺失字段的默认值（避免CoreAlgo警告和信号被阻止）
+            if "lag_sec" not in normalized_row or normalized_row.get("lag_sec") is None:
+                normalized_row["lag_sec"] = 0.0  # 默认无延迟
+            if "consistency" not in normalized_row or normalized_row.get("consistency") is None:
+                normalized_row["consistency"] = 1.0  # 默认完全一致
+            if "warmup" not in normalized_row or normalized_row.get("warmup") is None:
+                normalized_row["warmup"] = False  # False表示已完成warmup，可以交易（True表示正在warmup，会阻止信号）
+            if "spread_bps" not in normalized_row or normalized_row.get("spread_bps") is None:
+                normalized_row["spread_bps"] = 2.0  # 默认2.0 bps（合理值，避免spread检查失败）
+            
+            # P0修复: 注入固定lag_sec（用于强制触发lag检查）
+            signal_config = config.get("signal", {})
+            if signal_config.get("inject_lag_sec") is not None:
+                inject_lag = signal_config.get("inject_lag_sec")
+                normalized_row["lag_sec"] = inject_lag
+                logger.debug(f"[replay_harness] Injected lag_sec={inject_lag} for lag trigger test")
+            
+            # P0修复: 注入低consistency（用于强制触发consistency检查）
+            if signal_config.get("inject_low_consistency", False):
+                inject_consistency = signal_config.get("inject_consistency_value", 0.1)
+                normalized_row["consistency"] = inject_consistency
+                logger.debug(f"[replay_harness] Injected consistency={inject_consistency} for consistency trigger test")
+            
             # Feed to CORE_ALGO
-            signal = feeder.algo.process_feature_row(feature_row)
+            signal = feeder.algo.process_feature_row(normalized_row)
             if signal:
                 # P0-1: 将完整的场景上下文附加到signal（与Feeder保持一致）
                 # 确保情境化滑点/费用在全路径回放时生效
@@ -509,8 +574,12 @@ def main():
         "data_fingerprint": data_fingerprint,  # P2-3: 数据指纹（path, size, mtime）
         "config": config,
         "args": vars(args),
-        "reader_stats": reader_stats,  # P1: 包含reader_dedup_rate, missing_field_counts等
+        "reader_stats": reader_stats,  # P1: 包含reader_dedup_rate, missing_field_counts等（P2: 包含sample_files）
         "feeder_stats": feeder_stats,
+        # P2修复: 记录ReplayFeeder的生效参数快照
+        "effective_params": feeder.effective_params if hasattr(feeder, "effective_params") else {},
+        # P2修复: 记录Aligner质量指标（用于质量→收益串联）
+        "aligner_stats": aligner_stats,
         "trade_stats": {
             "total_trades": len(trade_sim.trades),
             "open_positions": len(trade_sim.positions),

@@ -2467,6 +2467,45 @@ async def main_async(args):
                         logger.warning(f"提取sink_used失败（{log_file}）: {e}")
             
             reporter.save_report(report, format="both")
+        
+        # Fix 1: TASK-09 复盘报表生成（如果启用report且存在回测结果）
+        if "report" in enabled_modules:
+            try:
+                # 查找回测结果目录
+                backtest_dirs = list(output_dir.glob("backtest*"))
+                if backtest_dirs:
+                    # 选择最新的回测结果目录
+                    latest_backtest_dir = max(backtest_dirs, key=lambda p: p.stat().st_mtime)
+                    
+                    # 检查是否有backtest_*子目录
+                    subdirs = list(latest_backtest_dir.glob("backtest_*"))
+                    if subdirs:
+                        logger.info(f"[Report] 发现回测结果目录: {latest_backtest_dir}")
+                        
+                        try:
+                            # 导入ReportGenerator
+                            import sys
+                            sys.path.insert(0, str(project_root / "src"))
+                            from alpha_core.report.summary import ReportGenerator
+                            
+                            # 生成复盘报表
+                            generator = ReportGenerator(latest_backtest_dir)
+                            report_file = generator.generate_report()
+                            
+                            if report_file:
+                                logger.info(f"[Report] 复盘报表已生成: {report_file}")
+                            else:
+                                logger.warning("[Report] 复盘报表生成失败")
+                        except Exception as e:
+                            # Fix 1: 异常降级，不中断主流程
+                            logger.warning(f"[Report] 生成复盘报表时出错（已降级）: {e}", exc_info=True)
+                    else:
+                        logger.debug("[Report] 未找到回测结果子目录，跳过复盘报表生成")
+                else:
+                    logger.debug("[Report] 未找到回测结果目录，跳过复盘报表生成")
+            except Exception as e:
+                # Fix 1: 异常降级，不中断主流程
+                logger.warning(f"[Report] 检查回测结果时出错（已降级）: {e}", exc_info=True)
             
             # 保存运行清单
             ended_at = datetime.utcnow()

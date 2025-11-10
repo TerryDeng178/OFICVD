@@ -1,0 +1,340 @@
+{
+  "overall": {
+    "total_trades": 6229,
+    "total_pnl": -3400.012608306536,
+    "total_fee": 2491.6097249213985,
+    "total_slippage": 622.9047696056549,
+    "total_turnover": 12458048.624607,
+    "win_rate": 0.0,
+    "risk_reward_ratio": 0.0,
+    "sharpe_ratio": -57.29821906082609,
+    "sortino_ratio": -57.29821906082609,
+    "max_drawdown": 2981.986585661051,
+    "MAR": -47.88771694531896,
+    "avg_hold_sec": 39.0,
+    "avg_hold_long": 39.0,
+    "avg_hold_short": 39.0,
+    "scenario_breakdown": {
+      "A_H_unknown": {
+        "trades": 4974,
+        "pnl": -2723.691491294167,
+        "wins": 370,
+        "losses": 4604,
+        "win_rate": 0.07438681141938078,
+        "avg_pnl": -0.5475857441283005,
+        "avg_hold_sec": 121.31990521327015
+      },
+      "A_L_unknown": {
+        "trades": 1250,
+        "pnl": -672.9738699625489,
+        "wins": 123,
+        "losses": 1127,
+        "win_rate": 0.0984,
+        "avg_pnl": -0.5383790959700391,
+        "avg_hold_sec": 175.5733137829912
+      },
+      "unknown_unknown": {
+        "trades": 5,
+        "pnl": -3.3472470498165965,
+        "wins": 0,
+        "losses": 5,
+        "win_rate": 0.0,
+        "avg_pnl": -0.6694494099633193,
+        "avg_hold_sec": 0.0
+      }
+    },
+    "invalid_scenario_rate": 0.0,
+    "invalid_fee_tier_rate": 0.0,
+    "turnover_maker": 0.0,
+    "turnover_taker": 12458048.62460706,
+    "fee_tier_distribution": {
+      "null": 12453047.97268966,
+      "TM": 5000.651917399835
+    },
+    "avg_ret1s_bps": 0.0
+  },
+  "by_hour": {
+    "0": {
+      "count": 1333,
+      "pnl_net": -374.4461544887669,
+      "fee": 266.5960248052727,
+      "slippage": 133.29999999999671,
+      "win_rate": 0.03075768942235559,
+      "avg_hold_sec": 0
+    },
+    "1": {
+      "count": 1119,
+      "pnl_net": -283.82136670325536,
+      "fee": 223.80548648675216,
+      "slippage": 111.89999999999792,
+      "win_rate": 0.05093833780160858,
+      "avg_hold_sec": 0
+    },
+    "2": {
+      "count": 1511,
+      "pnl_net": -405.813041858627,
+      "fee": 302.1892388766595,
+      "slippage": 151.0999999999957,
+      "win_rate": 0.05294506949040371,
+      "avg_hold_sec": 0
+    },
+    "3": {
+      "count": 1735,
+      "pnl_net": -455.0230737210657,
+      "fee": 346.9990881147481,
+      "slippage": 173.49999999999443,
+      "win_rate": 0.05187319884726225,
+      "avg_hold_sec": 0
+    },
+    "4": {
+      "count": 1285,
+      "pnl_net": -349.3920001365625,
+      "fee": 257.00558672029,
+      "slippage": 128.499999999997,
+      "win_rate": 0.045136186770428015,
+      "avg_hold_sec": 0
+    },
+    "5": {
+      "count": 1345,
+      "pnl_net": -389.5984081793451,
+      "fee": 269.0038209662656,
+      "slippage": 134.49999999999665,
+      "win_rate": 0.031226765799256505,
+      "avg_hold_sec": 0
+    },
+    "6": {
+      "count": 1216,
+      "pnl_net": -336.4356269824301,
+      "fee": 243.20078912566424,
+      "slippage": 121.59999999999737,
+      "win_rate": 0.02631578947368421,
+      "avg_hold_sec": 0
+    },
+    "7": {
+      "count": 1249,
+      "pnl_net": -341.62395616700417,
+      "fee": 249.8026337959411,
+      "slippage": 124.89999999999718,
+      "win_rate": 0.03282626100880705,
+      "avg_hold_sec": 0
+    },
+    "8": {
+      "count": 1242,
+      "pnl_net": -335.35518797039254,
+      "fee": 248.40138072299305,
+      "slippage": 124.19999999999722,
+      "win_rate": 0.030595813204508857,
+      "avg_hold_sec": 0
+    },
+    "9": {
+      "count": 273,
+      "pnl_net": -71.69096082779458,
+      "fee": 54.60205820276278,
+      "slippage": 27.300000000000118,
+      "win_rate": 0.03663003663003663,
+      "avg_hold_sec": 0
+    },
+    "10": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "11": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "12": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "13": {
+      "count": 150,
+      "pnl_net": -56.812831271290065,
+      "fee": 30.0036171040216,
+      "slippage": 14.999999999999963,
+      "win_rate": 0.02666666666666667,
+      "avg_hold_sec": 0
+    },
+    "14": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "15": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "16": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "17": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "18": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "19": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "20": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "21": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "22": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    },
+    "23": {
+      "count": 0,
+      "pnl_net": 0.0,
+      "fee": 0.0,
+      "slippage": 0.0,
+      "win_rate": 0,
+      "avg_hold_sec": 0
+    }
+  },
+  "by_scenario": {
+    "A_H": {
+      "count": 9918,
+      "pnl_net": -2723.691491294167,
+      "fee": 1983.602823502,
+      "slippage": 991.800000000157,
+      "win_rate": 0.03730590844928413,
+      "risk_reward_ratio": 0.7377685752087412
+    },
+    "A_L": {
+      "count": 2535,
+      "pnl_net": -672.9738699625489,
+      "fee": 507.0067710360629,
+      "slippage": 253.49999999998988,
+      "win_rate": 0.0485207100591716,
+      "risk_reward_ratio": 0.6049905932658927
+    },
+    "unknown_unknown": {
+      "count": 5,
+      "pnl_net": -3.3472470498165965,
+      "fee": 1.0001303834799673,
+      "slippage": 0.5,
+      "win_rate": 0.0,
+      "risk_reward_ratio": 0.0
+    }
+  },
+  "by_symbol": {
+    "BNBUSDT": {
+      "count": 1546,
+      "pnl_net": -418.0260226454854,
+      "fee": 309.2000662463413,
+      "slippage": 154.5999999999955,
+      "win_rate": 0.04204398447606727,
+      "risk_reward_ratio": 0.7389451652914181,
+      "avg_hold_sec": 0
+    },
+    "BTCUSDT": {
+      "count": 2280,
+      "pnl_net": -628.2752042046508,
+      "fee": 456.0012833886987,
+      "slippage": 227.99999999999133,
+      "win_rate": 0.012280701754385965,
+      "risk_reward_ratio": 0.9853431343432155,
+      "avg_hold_sec": 0
+    },
+    "DOGEUSDT": {
+      "count": 1360,
+      "pnl_net": -345.359431553033,
+      "fee": 271.99908036263395,
+      "slippage": 135.99999999999656,
+      "win_rate": 0.0875,
+      "risk_reward_ratio": 0.7989700449686565,
+      "avg_hold_sec": 0
+    },
+    "ETHUSDT": {
+      "count": 2636,
+      "pnl_net": -761.0983886055086,
+      "fee": 527.2067368728659,
+      "slippage": 263.59999999999144,
+      "win_rate": 0.023899848254931716,
+      "risk_reward_ratio": 0.5501711108630495,
+      "avg_hold_sec": 0
+    },
+    "SOLUSDT": {
+      "count": 2594,
+      "pnl_net": -714.6246966730032,
+      "fee": 518.8026222677818,
+      "slippage": 259.3999999999905,
+      "win_rate": 0.040863531225905934,
+      "risk_reward_ratio": 0.6335605615076648,
+      "avg_hold_sec": 0
+    },
+    "XRPUSDT": {
+      "count": 2042,
+      "pnl_net": -532.628864624855,
+      "fee": 408.39993578303745,
+      "slippage": 204.19999999999268,
+      "win_rate": 0.05484818805093046,
+      "risk_reward_ratio": 0.5410163760305512,
+      "avg_hold_sec": 0
+    }
+  },
+  "cost_breakdown": {
+    "total_fee": 2491.609724921363,
+    "total_slippage": 1245.7999999999624,
+    "total_cost": 3737.4097249213255,
+    "maker_turnover": 0,
+    "taker_turnover": 0,
+    "cost_ratio": 1.0992340780709118
+  }
+}

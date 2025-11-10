@@ -47,6 +47,18 @@ class TradeSimulator:
         
         logger.info(f"[TradeSim] Rollover timezone: {self.rollover_timezone}, rollover_hour: {self.rollover_hour}")
         
+        # P0修复: Scenario标准化方法
+        def _normalize_scenario(s: str) -> str:
+            """标准化scenario格式: A_H_unknown -> A_H"""
+            if not s:
+                return "unknown"
+            parts = s.split("_")
+            if len(parts) >= 2:
+                return f"{parts[0]}_{parts[1]}"  # A_H_unknown -> A_H
+            return s
+        
+        self._normalize_scenario = _normalize_scenario
+        
         # Trade parameters
         self.taker_fee_bps = config.get("taker_fee_bps", 2.0)
         self.slippage_bps = config.get("slippage_bps", 1.0)
@@ -55,6 +67,12 @@ class TradeSimulator:
         self.take_profit_bps = config.get("take_profit_bps")
         self.stop_loss_bps = config.get("stop_loss_bps")
         self.min_hold_time_sec = config.get("min_hold_time_sec")
+        # P0修复: 添加超时强平选项，让min_hold_time_sec真正有影响
+        self.force_timeout_exit = bool(config.get("force_timeout_exit", False))
+        # A组修复: 添加最大持仓时长保护（默认3600s，防止极端长尾）
+        self.max_hold_time_sec = config.get("max_hold_time_sec", 3600)
+        # B组优化: 死区带（只有价格相对开仓跨出死区才评估反向/TP）
+        self.deadband_bps = config.get("deadband_bps", 0)
         
         # P1.3增强: 滑点/费用情境化模型
         self.slippage_model = config.get("slippage_model", os.getenv("SLIPPAGE_MODEL", "static"))
@@ -64,15 +82,39 @@ class TradeSimulator:
         self.slippage_piecewise_config = config.get("slippage_piecewise", {})
         self.fee_tiered_config = config.get("fee_tiered", {})
         
+        # P1-2: Maker/Taker概率模型参数化配置
+        self.fee_maker_taker_config = config.get("fee_maker_taker", {})
+        # 默认概率配置
+        default_scenario_probs = {
+            "Q_H": 0.2,  # 宽&动 - 高taker概率（80% taker）
+            "A_L": 0.8,  # 紧&静 - 高maker概率（80% maker）
+            "A_H": 0.4,  # 紧&动 - 中等taker概率（60% taker）
+            "Q_L": 0.6,  # 宽&静 - 中等maker概率（60% maker）
+        }
+        self.scenario_probs = self.fee_maker_taker_config.get("scenario_probs", default_scenario_probs)
+        self.spread_slope = self.fee_maker_taker_config.get("spread_slope", 0.7)  # spread调整系数
+        self.spread_threshold_wide = self.fee_maker_taker_config.get("spread_threshold_wide", 5.0)  # 宽spread阈值
+        self.spread_threshold_narrow = self.fee_maker_taker_config.get("spread_threshold_narrow", 1.0)  # 窄spread阈值
+        default_side_bias = {
+            "buy": 1.2,   # 买入更容易maker
+            "sell": 0.8,  # 卖出更容易taker
+        }
+        self.side_bias = self.fee_maker_taker_config.get("side_bias", default_side_bias)
+        self.maker_fee_ratio = self.fee_maker_taker_config.get("maker_fee_ratio", 0.5)  # Maker费率相对taker的比率
+        
         logger.info(f"[TradeSim] Slippage model: {self.slippage_model}, Fee model: {self.fee_model}")
         if self.slippage_model == "piecewise":
             logger.info(f"[TradeSim] Slippage piecewise config: {self.slippage_piecewise_config}")
         if self.fee_model == "tiered":
             logger.info(f"[TradeSim] Fee tiered config: {self.fee_tiered_config}")
+        if self.fee_model == "maker_taker":
+            logger.info(f"[TradeSim] Maker/Taker config: scenario_probs={self.scenario_probs}, spread_slope={self.spread_slope}, side_bias={self.side_bias}")
         
         # State tracking
         self.positions: Dict[str, Dict[str, Any]] = {}  # symbol -> position info
         self.trades: List[Dict[str, Any]] = []
+        # A组修复: 跟踪最后一条信号（用于期末强制平仓时提供完整的feature_data）
+        self._last_signal_per_symbol: Dict[str, Dict[str, Any]] = {}  # symbol -> last signal
         self.pnl_daily: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
             "date": "",
             "symbol": "",
@@ -101,13 +143,80 @@ class TradeSimulator:
         
         # Output files
         self.trades_file = self.output_dir / "trades.jsonl"
+        # 初始化时创建空文件（即使没有交易也创建文件，保持一致性）
+        self.trades_file.touch()
         self.pnl_file = self.output_dir / "pnl_daily.jsonl"
         self.gate_reason_file = self.output_dir / "gate_reason_breakdown.json"
+        # P2修复: 时间线探针（trace）- 输出每笔entry/exit的详细信息
+        self.trace_file = self.output_dir / "trace.csv"
+        self._init_trace_file()
         
         logger.info(
             f"[TradeSim] Initialized: fee={self.taker_fee_bps}bps, "
             f"slippage={self.slippage_bps}bps, notional={self.notional_per_trade}"
         )
+    
+    def _init_trace_file(self) -> None:
+        """P2修复: 初始化trace文件（时间线探针）"""
+        import csv
+        
+        if not self.trace_file.exists():
+            with open(self.trace_file, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "ts_ms", "symbol", "side", "action", "confirm", "gating_blocked", "gate_reason",
+                    "hold_time_s", "pnl_bps", "spread_bps", "vol_bps", "scenario", "exit_reason",
+                    "signal_score", "signal_type"
+                ])
+    
+    def _record_trace(self, ts_ms: int, symbol: str, side: str, action: str, signal: Optional[Dict[str, Any]] = None,
+                     position: Optional[Dict[str, Any]] = None, exit_reason: Optional[str] = None) -> None:
+        """P2修复: 记录trace信息（时间线探针）"""
+        import csv
+        
+        feature_data = signal.get("_feature_data", {}) if signal else {}
+        gating_blocked = signal.get("gating_blocked", signal.get("gating", False)) if signal else False
+        
+        # 计算持仓时长和PnL
+        hold_time_s = None
+        pnl_bps = None
+        if position and action == "exit":
+            entry_ts_ms = position.get("entry_ts_ms", 0)
+            entry_px = position.get("entry_px", 0)
+            pos_side = position.get("side", "")
+            if entry_ts_ms and ts_ms:
+                hold_time_s = (ts_ms - entry_ts_ms) / 1000.0
+            if entry_px:
+                # 从signal或position获取mid_price（_check_exit传入的mid_price）
+                mid_price = signal.get("mid_price", 0) if signal else 0
+                if not mid_price and position:
+                    # 如果没有mid_price，使用entry_px作为近似
+                    mid_price = entry_px
+                if mid_price and entry_px:
+                    if pos_side == "buy":
+                        pnl_bps = ((mid_price - entry_px) / entry_px) * 10000
+                    else:
+                        pnl_bps = ((entry_px - mid_price) / entry_px) * 10000
+        
+        with open(self.trace_file, "a", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                ts_ms,
+                symbol,
+                side or "",
+                action,
+                signal.get("confirm", False) if signal else False,
+                gating_blocked,
+                signal.get("gate_reason", "") if signal else "",
+                hold_time_s or "",
+                pnl_bps or "",
+                feature_data.get("spread_bps", ""),
+                feature_data.get("vol_bps", ""),
+                feature_data.get("scenario_2x2", ""),
+                exit_reason or "",
+                signal.get("signal_score", "") if signal else "",
+                signal.get("signal_type", "") if signal else "",
+            ])
     
     def _biz_date(self, ts_ms: int) -> str:
         """Calculate business date with timezone and custom rollover hour
@@ -249,42 +358,34 @@ class TradeSimulator:
             return fee_bps
         
         if self.fee_model == "maker_taker":
-            # P0-3: Maker/Taker费用模型（基于spread_bps/scenario_2x2决定成交落点概率）
+            # P0-3/P1-2: Maker/Taker费用模型（基于spread_bps/scenario_2x2决定成交落点概率）
+            # P1-2: 概率规则已参数化，从配置读取
             # 获取市场上下文
             fd = signal.get("_feature_data", {}) if signal else {}
             spread_bps = float(fd.get("spread_bps") or 0.0)
-            scenario = fd.get("scenario_2x2", "")
+            raw_scenario = fd.get("scenario_2x2", "") or (signal.get("scenario", "") if signal else "")
             
-            # 基于spread和scenario决定maker/taker概率
-            # "宽&动"场景（Q_H）提高taker概率，窄&静场景（A_L）提高maker概率
-            maker_probability = 0.5  # 默认50%
+            # P0修复: 标准化scenario格式（A_H_unknown -> A_H）
+            scenario = self._normalize_scenario(raw_scenario)
             
-            if scenario == "Q_H":  # 宽&动 - 高taker概率（80% taker）
-                maker_probability = 0.2
-            elif scenario == "A_L":  # 紧&静 - 高maker概率（80% maker）
-                maker_probability = 0.8
-            elif scenario == "A_H":  # 紧&动 - 中等taker概率（60% taker）
-                maker_probability = 0.4
-            elif scenario == "Q_L":  # 宽&静 - 中等maker概率（60% maker）
-                maker_probability = 0.6
+            # P1-2: 基于scenario决定maker/taker概率（从配置读取，带兜底）
+            maker_probability = self.scenario_probs.get(scenario, self.scenario_probs.get("default", 0.5))
             
-            # 基于spread调整：spread越大，taker概率越高（因为需要立即成交）
-            if spread_bps > 5.0:  # 宽spread
-                maker_probability *= 0.7  # 降低maker概率
-            elif spread_bps < 1.0:  # 窄spread
-                maker_probability *= 1.3  # 提高maker概率（但不能超过1.0）
+            # P1-2: 基于spread调整（从配置读取阈值和系数）
+            if spread_bps > self.spread_threshold_wide:  # 宽spread
+                maker_probability *= self.spread_slope  # 降低maker概率
+            elif spread_bps < self.spread_threshold_narrow:  # 窄spread
+                maker_probability *= (1.0 / self.spread_slope)  # 提高maker概率（但不能超过1.0）
                 maker_probability = min(maker_probability, 1.0)
             
-            # 根据side决定：买入通常更容易maker（挂买单），卖出通常更容易taker（立即成交）
-            if side == "buy":
-                maker_probability *= 1.2  # 买入更容易maker
-            else:
-                maker_probability *= 0.8  # 卖出更容易taker
+            # P1-2: 根据side决定（从配置读取bias）
+            side_bias_value = self.side_bias.get(side, 1.0)
+            maker_probability *= side_bias_value
             
             maker_probability = max(0.0, min(1.0, maker_probability))  # 限制在[0, 1]
             
-            # 根据概率决定费率（简化：使用期望费率）
-            maker_fee = self.taker_fee_bps * 0.5  # Maker费率通常是taker的一半
+            # P1-2: 根据概率决定费率（从配置读取maker费率比率）
+            maker_fee = self.taker_fee_bps * self.maker_fee_ratio
             taker_fee = self.taker_fee_bps
             
             # 返回期望费率
@@ -312,23 +413,36 @@ class TradeSimulator:
         symbol = signal.get("symbol", "")
         ts_ms = signal.get("ts_ms", 0)
         confirm = signal.get("confirm", False)
-        gating = signal.get("gating", True)
+        # 修复A: 门控语义 - gating=True表示"被门控阻止"，优先读取gating_blocked（兼容gating）
+        gating_blocked = signal.get("gating_blocked", signal.get("gating", False))
         signal_type = signal.get("signal_type", "neutral")
         
-        # P0: 回测信号入口门控可选绕过
-        # 生产模式：仅处理已确认且未被gating的信号
-        # 回测模式：可忽略gating，仅以confirm判断（用于纯策略收益评估）
+        # P0修复: 统计所有信号的gate原因（包括未确认和被阻止的）
+        # 先统计gate原因，再判断是否处理
+        if gating_blocked:
+            gate_reason = signal.get("gate_reason", "unknown")
+            # P0修复: 拆分逗号分隔的gate原因，分别统计
+            self._record_gate_reasons(gate_reason)
+        
+        # 修复A: 仅处理已确认信号
         if not confirm:
+            return None
+        
+        # 修复A: 执行门控 - 若不是"忽略门控回测"，则gating_blocked=True直接拦截
+        if not self.ignore_gating_in_backtest and gating_blocked:
+            # gate_reason已在上面统计，这里直接返回
+            logger.debug(f"[TradeSim] Signal blocked by gate: {gate_reason}, symbol={symbol}, ts_ms={ts_ms}")
             return None
         
         # P1.4: 统计总信号数（用于计算非法场景/费率比例）
         self.total_signal_count += 1
         
+        # A组修复: 跟踪最后一条信号（用于期末强制平仓时提供完整的feature_data）
+        self._last_signal_per_symbol[symbol] = signal.copy()
+        
         # P1: 统计gate原因分布（即使忽略gating也记录，用于诊断）
         # P1: 同时汇总Aligner质量位（lag_bad, is_gap_second）到gate_reason_breakdown
-        if gating:
-            gate_reason = signal.get("gate_reason", "unknown")
-            self.gate_reason_breakdown[gate_reason] += 1
+        # 注意：gate原因已在上面统计，这里不再重复统计
         
         # P1: 汇总Aligner质量位到gate_reason_breakdown（用于诊断）
         # 注意：这些字段来自feature_row，需要通过signal传递
@@ -339,9 +453,6 @@ class TradeSimulator:
             self.gate_reason_breakdown["lag_bad_orderbook"] += 1
         if feature_data.get("is_gap_second", 0) == 1:
             self.gate_reason_breakdown["is_gap_second"] += 1
-        
-        if not self.ignore_gating_in_backtest and gating:
-            return None
         
         # Determine direction
         side = None
@@ -358,11 +469,18 @@ class TradeSimulator:
         
         if position is None:
             # Enter new position
-            return self._enter_position(symbol, side, ts_ms, mid_price, signal)
+            trade = self._enter_position(symbol, side, ts_ms, mid_price, signal)
+            # P2修复: 记录entry trace
+            if trade:
+                self._record_trace(ts_ms, symbol, side, "entry", signal)
+            return trade
         else:
             # Check exit conditions
             exit_trade = self._check_exit(position, signal, ts_ms, mid_price)
             if exit_trade:
+                # P2修复: 记录exit trace
+                exit_reason = exit_trade.get("reason", "unknown")
+                self._record_trace(ts_ms, symbol, position["side"], "exit", signal, position, exit_reason)
                 return exit_trade
             
             # Check reverse condition
@@ -445,38 +563,114 @@ class TradeSimulator:
         return trade
     
     def _check_exit(self, position: Dict[str, Any], signal: Dict[str, Any], ts_ms: int, mid_price: float) -> Optional[Dict[str, Any]]:
-        """Check if position should be exited"""
+        """Check if position should be exited
+        
+        修复B: 重排退出判定顺序，保证min_hold_time_sec优先生效
+        - 止损例外：安全优先，任何时刻都可触发
+        - 未达最小持仓 → 禁止TP/反向退出
+        - 达到最小持仓 → 按TP/反向正常评估
+        """
         symbol = position["symbol"]
         entry_ts_ms = position["entry_ts_ms"]
         entry_px = position["entry_px"]
         side = position["side"]
         
-        # Check reverse signal
-        signal_type = signal.get("signal_type", "neutral")
-        if side == "buy" and signal_type in ("sell", "strong_sell"):
-            return self._exit_position(position, ts_ms, mid_price, "reverse_signal", signal)
-        if side == "sell" and signal_type in ("buy", "strong_buy"):
-            return self._exit_position(position, ts_ms, mid_price, "reverse_signal", signal)
+        # P2修复: 将mid_price添加到signal中，供trace记录使用
+        if signal:
+            signal["mid_price"] = mid_price
         
-        # Check take profit / stop loss
+        # 修复C: 确保退出只由已确认信号触发
+        confirm = signal.get("confirm", False)
+        if not confirm:
+            return None
+        
+        # 修复B: 0) 计算持仓时长
+        hold_time_sec = (ts_ms - entry_ts_ms) / 1000 if entry_ts_ms else 0
+        
+        # A组修复: 最大持仓时长保护（防止极端长尾）
+        if self.max_hold_time_sec and hold_time_sec >= self.max_hold_time_sec:
+            logger.warning(
+                f"[TradeSim] Max hold time exceeded: symbol={symbol}, "
+                f"hold_time_sec={hold_time_sec:.1f} >= {self.max_hold_time_sec}s, forcing timeout exit"
+            )
+            exit_trade = self._exit_position(position, ts_ms, mid_price, "timeout", signal)
+            if exit_trade:
+                self._record_trace(ts_ms, symbol, side, "exit", signal, position, "timeout")
+            return exit_trade
+        
+        # 计算PnL（用于TP/SL判断）
         if side == "buy":
             pnl_bps = ((mid_price - entry_px) / entry_px) * 10000
         else:
             pnl_bps = ((entry_px - mid_price) / entry_px) * 10000
         
-        if self.take_profit_bps and pnl_bps >= self.take_profit_bps:
-            return self._exit_position(position, ts_ms, mid_price, "take_profit", signal)
+        # 修复B: 1) 止损例外：安全优先，任何时刻都可触发
         if self.stop_loss_bps and pnl_bps <= -self.stop_loss_bps:
-            return self._exit_position(position, ts_ms, mid_price, "stop_loss", signal)
+            # 验证不变量4: 记录止损时的市场状态
+            feature_data = signal.get("_feature_data", {})
+            logger.debug(
+                f"[TradeSim] Stop loss triggered: symbol={symbol}, "
+                f"pnl_bps={pnl_bps:.2f}, spread_bps={feature_data.get('spread_bps', 'N/A')}, "
+                f"scenario={feature_data.get('scenario_2x2', 'N/A')}"
+            )
+            exit_trade = self._exit_position(position, ts_ms, mid_price, "stop_loss", signal)
+            if exit_trade:
+                # P2修复: 记录exit trace
+                self._record_trace(ts_ms, symbol, side, "exit", signal, position, "stop_loss")
+            return exit_trade
         
-        # Check min hold time
-        if self.min_hold_time_sec:
-            hold_time_sec = (ts_ms - entry_ts_ms) / 1000
-            if hold_time_sec >= self.min_hold_time_sec:
-                # Allow exit on any weak reverse signal
-                if (side == "buy" and signal_type in ("sell", "strong_sell")) or \
-                   (side == "sell" and signal_type in ("buy", "strong_buy")):
-                    return self._exit_position(position, ts_ms, mid_price, "timeout", signal)
+        # 修复B: 2) 未达最小持仓 → 禁止TP/反向退出（可通过配置开例外）
+        if self.min_hold_time_sec and hold_time_sec < self.min_hold_time_sec:
+            # 验证不变量2: hold_time_sec < min_hold_time_sec期间，不允许触发reverse_signal与take_profit
+            return None
+        
+        # 修复B: 3) 达到最小持仓 → 按TP/反向正常评估
+        signal_type = signal.get("signal_type", "neutral")
+        
+        # B组优化: 死区带检查（只有价格相对开仓跨出死区才评估反向/TP）
+        if self.deadband_bps > 0:
+            if abs(pnl_bps) < self.deadband_bps:
+                # 价格在死区内，不评估反向/TP
+                return None
+        
+        # 检查止盈
+        if self.take_profit_bps and pnl_bps >= self.take_profit_bps:
+            exit_trade = self._exit_position(position, ts_ms, mid_price, "take_profit", signal)
+            if exit_trade:
+                self._record_trace(ts_ms, symbol, side, "exit", signal, position, "take_profit")
+            return exit_trade
+        
+        # 检查反向信号
+        if side == "buy" and signal_type in ("sell", "strong_sell"):
+            # 验证不变量3: 退出必须来自已确认信号
+            logger.debug(
+                f"[TradeSim] Reverse exit: symbol={symbol}, signal_type={signal_type}, "
+                f"confirm={confirm}, signal_score={signal.get('signal_score', 'N/A')}, "
+                f"gate_reason={signal.get('gate_reason', 'N/A')}"
+            )
+            exit_trade = self._exit_position(position, ts_ms, mid_price, "reverse_signal", signal)
+            if exit_trade:
+                self._record_trace(ts_ms, symbol, side, "exit", signal, position, "reverse_signal")
+            return exit_trade
+        if side == "sell" and signal_type in ("buy", "strong_buy"):
+            logger.debug(
+                f"[TradeSim] Reverse exit: symbol={symbol}, signal_type={signal_type}, "
+                f"confirm={confirm}, signal_score={signal.get('signal_score', 'N/A')}, "
+                f"gate_reason={signal.get('gate_reason', 'N/A')}"
+            )
+            exit_trade = self._exit_position(position, ts_ms, mid_price, "reverse_signal", signal)
+            if exit_trade:
+                self._record_trace(ts_ms, symbol, side, "exit", signal, position, "reverse_signal")
+            return exit_trade
+        
+        # 修复B: 4) 超时离场（保留现逻辑）
+        if self.min_hold_time_sec and hold_time_sec >= self.min_hold_time_sec:
+            if self.force_timeout_exit:
+                # P0修复: 强制超时平仓（无需反向信号）
+                exit_trade = self._exit_position(position, ts_ms, mid_price, "timeout", signal)
+                if exit_trade:
+                    self._record_trace(ts_ms, symbol, side, "exit", signal, position, "timeout")
+                return exit_trade
         
         return None
     
@@ -597,6 +791,8 @@ class TradeSimulator:
         
         代码.5: 使用最后一条市场数据ts作为"日末平仓"时间，而非now()
         
+        P0修复: 如果force_timeout_exit启用，优先使用timeout退出（满足min_hold_time_sec要求）
+        
         Args:
             current_prices: Current mid prices for each symbol
             last_data_ts_ms: Timestamp of the last market data (代码.5)
@@ -617,9 +813,36 @@ class TradeSimulator:
         
         for symbol, position in list(self.positions.items()):
             mid_price = current_prices.get(symbol, position["entry_px"])
-            # P1: 使用rollover_close作为reason，标识技术性平仓
-            # 代码.5: 使用最后一条市场数据ts
-            self._exit_position(position, last_data_ts_ms, mid_price, "rollover_close", None)
+            
+            # A组修复: 使用最后一条信号（包含完整的feature_data）进行期末强制平仓
+            last_signal = self._last_signal_per_symbol.get(symbol, {})
+            # 如果没有最后一条信号，创建一个最小信号字典
+            if not last_signal:
+                last_signal = {
+                    "symbol": symbol,
+                    "ts_ms": last_data_ts_ms,
+                    "confirm": True,
+                    "_feature_data": {},
+                }
+            
+            # P0修复: 如果force_timeout_exit启用，检查是否满足min_hold_time_sec
+            # 如果满足，使用timeout退出（符合force_timeout_exit语义）
+            # 如果不满足或未启用，使用rollover_close（技术性平仓）
+            exit_reason = "rollover_close"
+            if self.force_timeout_exit and self.min_hold_time_sec:
+                entry_ts_ms = position.get("entry_ts_ms", 0)
+                hold_time_sec = (last_data_ts_ms - entry_ts_ms) / 1000.0
+                if hold_time_sec >= self.min_hold_time_sec:
+                    exit_reason = "timeout"
+                    logger.debug(f"[TradeSim] Position {symbol} held for {hold_time_sec:.1f}s >= {self.min_hold_time_sec}s, using timeout exit")
+                else:
+                    logger.debug(f"[TradeSim] Position {symbol} held for {hold_time_sec:.1f}s < {self.min_hold_time_sec}s, using rollover_close")
+            
+            # A组修复: 使用最后一条信号（包含完整的feature_data）进行期末强制平仓
+            # 确保trace记录完整
+            exit_trade = self._exit_position(position, last_data_ts_ms, mid_price, exit_reason, last_signal)
+            if exit_trade:
+                self._record_trace(last_data_ts_ms, symbol, position["side"], "exit", last_signal, position, exit_reason)
         
         logger.info(f"[TradeSim] Closed {len(self.positions)} positions (all positions should be closed now)")
     
@@ -678,6 +901,58 @@ class TradeSimulator:
         
         # P1: Save gate_reason_breakdown
         self._save_gate_reason_breakdown()
+    
+    def _record_gate_reasons(self, gate_reason: Optional[str]) -> None:
+        """P0修复: 拆分逗号分隔的gate原因，分别统计，并映射融合理由到Gate原因
+        
+        Args:
+            gate_reason: 逗号分隔的gate原因字符串，如 "weak_signal,spread_bps>8.0,reason:low_consistency_throttle"
+        """
+        if not gate_reason:
+            self.gate_reason_breakdown["unknown"] += 1
+            return
+        
+        # 拆分逗号分隔的原因
+        reasons = [r.strip() for r in gate_reason.split(",") if r.strip()]
+        if not reasons:
+            self.gate_reason_breakdown["unknown"] += 1
+            return
+        
+        # P0修复: 融合理由到Gate原因的映射表
+        fusion_reason_mapping = {
+            "low_consistency_throttle": "low_consistency",
+            "lag_exceeded": "lag_sec_exceeded",
+            "warmup": "component_warmup",  # fusion组件的warmup
+            "degraded_ofi_only": "degraded_ofi_only",
+            "degraded_cvd_only": "degraded_cvd_only",
+        }
+        
+        # 分别统计每个原因
+        for reason in reasons:
+            # 处理spread_bps>阈值格式
+            if reason.startswith("spread_bps>"):
+                self.gate_reason_breakdown["spread_bps_exceeded"] += 1
+            # 处理lag_sec>阈值格式
+            elif reason.startswith("lag_sec>"):
+                self.gate_reason_breakdown["lag_sec_exceeded"] += 1
+            # 处理reason:code格式（融合理由）
+            elif reason.startswith("reason:"):
+                code = reason.replace("reason:", "").strip()
+                # 映射融合理由到Gate原因
+                mapped_reason = fusion_reason_mapping.get(code, f"reason_{code}")
+                self.gate_reason_breakdown[mapped_reason] += 1
+            # 直接原因
+            elif reason == "weak_signal":
+                self.gate_reason_breakdown["weak_signal"] += 1
+            elif reason == "low_consistency":
+                self.gate_reason_breakdown["low_consistency"] += 1
+            elif reason == "warmup":
+                self.gate_reason_breakdown["warmup"] += 1
+            elif reason.startswith("reverse_cooldown"):
+                self.gate_reason_breakdown["reverse_cooldown"] += 1
+            else:
+                # 其他未知原因直接记录
+                self.gate_reason_breakdown[reason] += 1
     
     def _save_gate_reason_breakdown(self) -> None:
         """P1: Save gate reason breakdown to JSON file"""

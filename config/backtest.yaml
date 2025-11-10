@@ -4,30 +4,57 @@
 
 signal:
   sink: jsonl  # jsonl | sqlite | null
+  # 信号/中间件类产物目录（与 paths.output_dir 分离，便于清洁产出）
   output_dir: ./runtime
   replay_mode: 1  # Always 1 for backtest
+  # 信号生成参数（用于优化器参数覆盖）
+  weak_signal_threshold: 0.2  # 弱信号阈值
+  consistency_min: 0.15  # 最小一致性要求
+  thresholds:
+    active:
+      buy: 0.5  # Active模式买入阈值
+      sell: -0.5  # Active模式卖出阈值
 
 components:
   fusion:
     w_ofi: 0.6
     w_cvd: 0.4
+    # 融合参数（用于优化器参数覆盖）
+    adaptive_cooldown_k: 0.6  # 自适应冷却系数
+    flip_rearm_margin: 0.05  # 方向翻转重臂余量
   cvd:
     winsor_limit: 2.0
 
 strategy:
   mode: active  # auto | active | quiet (default: active for backtest)
+  # 若 CoreAlgo 需要"方向/阈值"，建议补这三项；若完全不用，可省略
+  direction: both           # both | long_only | short_only
+  entry_threshold: 0.0      # 融合信号阈值（按你融合信号口径自行设定）
+  exit_threshold: 0.0       # 退出信号阈值（按你融合信号口径自行设定）
 
 risk:
+  # 整体仓位与回撤口径（用于 TradeSim/聚合指标统一风控上限）
+  max_position_notional: 10000   # 单侧名义敞口上限
+  max_drawdown_bps: 2000         # 最大回撤（bps，2000 = 20%）
   gates:
     max_spread_bps: 2.5
     max_lag_sec: 0.5
     require_activity: true
 
-# 代码.4: Aligner门限配置（支持环境变量覆盖）
+# 代码.4/P1-5: Aligner门限配置（支持环境变量覆盖）
+# P1-5: 对齐指标的阈值外置，显式给出默认值，避免团队成员"看代码找阈值"
 aligner:
-  lag_threshold_ms: 5000  # 用于标记lag_bad的阈值（毫秒）
-  spread_threshold: 2.0    # 用于scenario_2x2判断的spread阈值（bps）
-  volatility_threshold: 5.0  # 用于scenario_2x2判断的波动阈值（bps）
+  # lag_threshold_ms: 用于标记lag_bad的阈值（毫秒）
+  # 默认值: 5000ms，可通过环境变量ALIGNER_LAG_THRESHOLD_MS覆盖
+  lag_threshold_ms: 5000
+  
+  # spread_threshold: 用于scenario_2x2判断的spread阈值（bps）
+  # 默认值: 2.0 bps，可通过环境变量ALIGNER_SPREAD_THRESHOLD覆盖
+  spread_threshold: 2.0
+  
+  # volatility_threshold: 用于scenario_2x2判断的波动阈值（bps）
+  # 默认值: 5.0 bps，可通过环境变量ALIGNER_VOLATILITY_THRESHOLD覆盖
+  volatility_threshold: 5.0
 
 # P1-2: Reader去重桶保留时长配置（支持环境变量覆盖）
 reader:
@@ -43,9 +70,12 @@ backtest:
   min_hold_time_sec: null  # Optional minimum hold time (seconds)
   ignore_gating_in_backtest: true  # P1: 默认绕过闸门（用于纯策略收益评估），但仍统计gate原因分布
   rollover_timezone: "UTC"  # P1增强: PnL日切口径（UTC vs 本地），支持Asia/Tokyo等
+  # 推荐：若为亚洲盘视角，可改为 "Asia/Tokyo" 和 rollover_hour: 8（东京08:00切日）
   rollover_hour: 0  # P1增强: 自定义rollover小时（0-23），0表示使用日期边界
   
   # P1.3增强: 滑点/费用情境化模型
+  # 当前使用简单模型（static/taker_static），更简单可控
+  # 若要让情境化模型生效，可改为: slippage_model: "piecewise", fee_model: "tiered"
   slippage_model: "static"  # Options: static, linear, piecewise
   fee_model: "taker_static"  # Options: taker_static, tiered, maker_taker
   
@@ -76,9 +106,34 @@ backtest:
       TK: 2.0  # Taker Taker: 默认taker费率
       MM: 1.0  # Maker Maker: 假设maker费率更低（50%）
       MK: 1.0  # Maker Taker: 假设maker费率更低（50%）
+  
+  # P1-2: Maker/Taker概率模型参数化配置（fee_model="maker_taker"时生效）
+  fee_maker_taker:
+    # 场景概率映射: {scenario_2x2} → maker概率
+    # Q_H: 宽&动 - 高taker概率（80% taker）
+    # A_L: 紧&静 - 高maker概率（80% maker）
+    # A_H: 紧&动 - 中等taker概率（60% taker）
+    # Q_L: 宽&静 - 中等maker概率（60% maker）
+    scenario_probs:
+      Q_H: 0.2  # 宽&动 - 高taker概率
+      A_L: 0.8  # 紧&静 - 高maker概率
+      A_H: 0.4  # 紧&动 - 中等taker概率
+      Q_L: 0.6  # 宽&静 - 中等maker概率
+    # spread调整系数（spread越大，taker概率越高）
+    spread_slope: 0.7  # 宽spread时maker概率乘以该系数
+    spread_threshold_wide: 5.0   # 宽spread阈值（bps）
+    spread_threshold_narrow: 1.0  # 窄spread阈值（bps）
+    # 买卖方向bias（买入更容易maker，卖出更容易taker）
+    side_bias:
+      buy: 1.2   # 买入更容易maker
+      sell: 0.8  # 卖出更容易taker
+    # Maker费率相对taker的比率（默认0.5，即maker费率是taker的一半）
+    maker_fee_ratio: 0.5
 
 # Input/output paths
 paths:
   input_dir: ./deploy/data/ofi_cvd
+  # 回测产物目录（与 signal.output_dir 分离，便于清洁产出）
+  # 若希望"一个目录收口"，可将两者对齐
   output_dir: ./runtime/backtest
 

@@ -1,0 +1,12 @@
+{
+  "strategy.entry_threshold": [0.3, 0.5, 0.7],
+  "strategy.exit_threshold": [0.1, 0.2, 0.3],
+  "components.fusion.w_ofi": [0.6, 0.7, 0.8],
+  "components.fusion.w_cvd": [0.4, 0.3, 0.2],
+  "backtest.take_profit_bps": [30, 40, 50],
+  "backtest.stop_loss_bps": [20, 30, 40],
+  "backtest.min_hold_time_sec": [60, 120, 180],
+  "backtest.slippage_model": ["static", "piecewise"],
+  "backtest.fee_model": ["taker_static", "maker_taker"]
+}
+

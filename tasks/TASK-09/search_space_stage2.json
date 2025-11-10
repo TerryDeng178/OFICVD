@@ -1,0 +1,35 @@
+{
+  "stage": 2,
+  "description": "阶段2：提收益 + 控成本",
+  "target": "net_pnl ↑、pnl_per_trade ↑，频次恢复到目标",
+  "search_space": {
+    "components.fusion.burst_coalesce_ms": [0, 100, 200, 300],
+    "backtest.min_hold_time_sec": [60, 90, 120]
+  },
+  "constraints": {
+    "scenario_thresholds": {
+      "A_L": {
+        "buy": [0.6, 0.65, 0.7],
+        "sell": [-0.7, -0.65, -0.6],
+        "description": "A_L场景略松（-1档）"
+      },
+      "Q_L": {
+        "buy": [0.6, 0.65, 0.7],
+        "sell": [-0.7, -0.65, -0.6],
+        "description": "Q_L场景略松（-1档）"
+      }
+    },
+    "trades_per_hour": {
+      "target_range": [0.8, 1.2],
+      "description": "每小时交易数目标范围（需要quantile阈值校准）"
+    }
+  },
+  "scoring_weights": {
+    "net_pnl": 0.3,
+    "pnl_per_trade": 0.3,
+    "trades_per_hour": 0.2,
+    "cost_ratio_notional": 0.2,
+    "description": "评分加入 pnl_per_trade 与 trades_per_hour 的区间惩罚"
+  }
+}
+

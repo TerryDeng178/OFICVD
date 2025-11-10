@@ -51,7 +51,9 @@ class MetricsAggregator:
                 "total_fee": 0.0,
                 "total_slippage": 0.0,
                 "total_turnover": 0.0,
-                "win_rate": 0.0,
+                "win_rate": 0.0,  # 日口径
+                "win_rate_trades": 0.0,  # 交易口径
+                "cost_bps_on_turnover": 0.0,  # 成本bps
                 "risk_reward_ratio": 0.0,
                 "sharpe_ratio": 0.0,
                 "sortino_ratio": 0.0,
@@ -67,6 +69,7 @@ class MetricsAggregator:
                 "turnover_taker": 0.0,
                 "fee_tier_distribution": {},
                 "avg_ret1s_bps": 0.0,
+                "by_symbol": {},  # 多品种公平权重：空交易时也包含by_symbol字段
             }
             # P1-4: 即使无交易也保存metrics并推送健康度指标
             self._save_metrics(empty_metrics, reader_stats=reader_stats, feeder_stats=feeder_stats, aligner_stats=aligner_stats)
@@ -88,14 +91,22 @@ class MetricsAggregator:
         total_slippage = sum(d.get("slippage", 0) for d in pnl_daily)
         total_turnover = sum(d.get("turnover", 0) for d in pnl_daily)
         
-        # Win rate
-        wins = sum(1 for d in pnl_daily if d.get("net_pnl", 0) > 0)
-        losses = sum(1 for d in pnl_daily if d.get("net_pnl", 0) < 0)
-        win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0.0
+        # Win rate - P0修复: 区分日口径和交易口径
+        # 日口径（保留，用于兼容）
+        wins_days = sum(1 for d in pnl_daily if d.get("net_pnl", 0) > 0)
+        losses_days = sum(1 for d in pnl_daily if d.get("net_pnl", 0) < 0)
+        win_rate_days = wins_days / (wins_days + losses_days) if (wins_days + losses_days) > 0 else 0.0
         
-        # Risk-reward ratio
-        avg_win = sum(d["net_pnl"] for d in pnl_daily if d.get("net_pnl", 0) > 0) / wins if wins > 0 else 0.0
-        avg_loss = abs(sum(d["net_pnl"] for d in pnl_daily if d.get("net_pnl", 0) < 0) / losses) if losses > 0 else 0.0
+        # 交易口径（用于优化打分）- P0修复
+        exit_reasons_for_winrate = ["exit", "reverse", "reverse_signal", "stop_loss", "take_profit", "timeout", "rollover_close"]
+        exit_trades = [t for t in trades if t.get("reason") in exit_reasons_for_winrate]
+        wins_trades = sum(1 for t in exit_trades if t.get("net_pnl", 0) > 0)
+        losses_trades = sum(1 for t in exit_trades if t.get("net_pnl", 0) < 0)
+        win_rate_trades = wins_trades / (wins_trades + losses_trades) if (wins_trades + losses_trades) > 0 else 0.0
+        
+        # Risk-reward ratio (使用日口径)
+        avg_win = sum(d["net_pnl"] for d in pnl_daily if d.get("net_pnl", 0) > 0) / wins_days if wins_days > 0 else 0.0
+        avg_loss = abs(sum(d["net_pnl"] for d in pnl_daily if d.get("net_pnl", 0) < 0) / losses_days) if losses_days > 0 else 0.0
         rr = avg_win / avg_loss if avg_loss > 0 else float("inf") if avg_win > 0 else 0.0
         
         # 代码.2: Sharpe/Sortino收益率归一（增加initial_equity）
@@ -188,7 +199,8 @@ class MetricsAggregator:
                 # Record entry
                 key = (symbol, side)
                 entry_map[key] = trade
-            elif reason in ["exit", "reverse", "rollover_close"]:
+            elif reason in ["exit", "reverse", "reverse_signal", "stop_loss", "take_profit", "timeout", "rollover_close"]:
+                # A组修复: 只统计已闭合的持仓对（忽略未闭合的持仓）
                 # Find matching entry
                 key = (symbol, side)
                 if key in entry_map:
@@ -317,6 +329,94 @@ class MetricsAggregator:
                 ret1s_values.append(abs(float(ret1s)))
         avg_ret1s_bps = sum(ret1s_values) / len(ret1s_values) if ret1s_values else 0.0
         
+        # 多品种公平权重：按symbol聚合生成by_symbol字段
+        by_symbol = {}
+        symbol_pnl_daily = defaultdict(list)
+        
+        # 按symbol分组pnl_daily
+        for daily in pnl_daily:
+            symbol = daily.get("symbol", "")
+            if symbol:
+                symbol_pnl_daily[symbol].append(daily)
+        
+        # 对每个symbol计算指标
+        for symbol, symbol_daily_list in symbol_pnl_daily.items():
+            symbol_total_pnl = sum(d.get("net_pnl", 0) for d in symbol_daily_list)
+            symbol_gross_pnl = sum(d.get("gross_pnl", 0) for d in symbol_daily_list)
+            symbol_fee = sum(d.get("fee", 0) for d in symbol_daily_list)
+            symbol_slippage = sum(d.get("slippage", 0) for d in symbol_daily_list)
+            symbol_turnover = sum(d.get("turnover", 0) for d in symbol_daily_list)
+            symbol_trades = sum(d.get("trades", 0) for d in symbol_daily_list)
+            symbol_wins = sum(d.get("wins", 0) for d in symbol_daily_list)
+            symbol_losses = sum(d.get("losses", 0) for d in symbol_daily_list)
+            
+            # 计算胜率
+            symbol_win_rate = symbol_wins / (symbol_wins + symbol_losses) if (symbol_wins + symbol_losses) > 0 else 0.0
+            
+            # 计算成本占比
+            symbol_cost_ratio = (symbol_fee + symbol_slippage) / abs(symbol_gross_pnl) if symbol_gross_pnl != 0 else 0.0
+            
+            # 计算该symbol的PnL序列（用于计算回撤和Sharpe）
+            symbol_pnl_series = []
+            symbol_cumulative_pnl = 0.0
+            for daily in sorted(symbol_daily_list, key=lambda x: x.get("date", "")):
+                symbol_cumulative_pnl += daily.get("net_pnl", 0)
+                symbol_pnl_series.append(symbol_cumulative_pnl)
+            
+            # 计算最大回撤
+            symbol_dd_max = 0.0
+            symbol_peak = symbol_pnl_series[0] if symbol_pnl_series else 0.0
+            for pnl in symbol_pnl_series:
+                if pnl > symbol_peak:
+                    symbol_peak = pnl
+                drawdown = symbol_peak - pnl
+                if drawdown > symbol_dd_max:
+                    symbol_dd_max = drawdown
+            
+            # 计算MAR（年化收益/最大回撤）
+            if symbol_dd_max > 0:
+                symbol_annual_return = (symbol_total_pnl / max(1, len(symbol_daily_list))) * 252
+                symbol_mar = symbol_annual_return / symbol_dd_max
+            else:
+                symbol_mar = float("inf") if symbol_total_pnl > 0 else 0.0
+            
+            # 计算Sharpe ratio（简化版，使用日收益率）
+            symbol_returns = []
+            if len(symbol_pnl_series) > 1:
+                equity_base = initial_equity if initial_equity else (trade_sim_stats.get("notional_per_trade", 1000.0) if trade_sim_stats else 1000.0)
+                for i in range(1, len(symbol_pnl_series)):
+                    daily_pnl = symbol_pnl_series[i] - symbol_pnl_series[i-1]
+                    daily_return = daily_pnl / equity_base if equity_base > 0 else 0.0
+                    symbol_returns.append(daily_return)
+            
+            if symbol_returns:
+                import statistics
+                symbol_mean_return = statistics.mean(symbol_returns)
+                symbol_std_return = statistics.stdev(symbol_returns) if len(symbol_returns) > 1 else 0.0
+                symbol_sharpe = (symbol_mean_return / symbol_std_return * (252 ** 0.5)) if symbol_std_return > 0 else 0.0
+            else:
+                symbol_sharpe = 0.0
+            
+            # 构建by_symbol条目
+            by_symbol[symbol] = {
+                "pnl_gross": symbol_gross_pnl,
+                "pnl_net": symbol_total_pnl,
+                "fee": symbol_fee,
+                "slippage": symbol_slippage,
+                "turnover": symbol_turnover,
+                "count": symbol_trades,  # 交易数
+                "wins": symbol_wins,
+                "losses": symbol_losses,
+                "win_rate": symbol_win_rate,
+                "cost_ratio": symbol_cost_ratio,
+                "max_drawdown": symbol_dd_max,
+                "MAR": symbol_mar,
+                "sharpe_ratio": symbol_sharpe,
+            }
+        
+        # P0修复: 计算成本bps（稳定口径，避免除以接近0的毛利导致发散）
+        cost_bps_on_turnover = ((total_fee + total_slippage) / total_turnover * 10000) if total_turnover > 0 else 0.0
+        
         # Build metrics dict
         metrics = {
             "total_trades": total_trades,
@@ -324,7 +424,9 @@ class MetricsAggregator:
             "total_fee": total_fee,
             "total_slippage": total_slippage,
             "total_turnover": total_turnover,
-            "win_rate": win_rate,
+            "win_rate": win_rate_days,  # 兼容保留（日口径）
+            "win_rate_trades": win_rate_trades,  # P0修复: 新增交易口径胜率（优化打分建议用它）
+            "cost_bps_on_turnover": cost_bps_on_turnover,  # P0修复: 新增成本bps口径
             "risk_reward_ratio": rr,
             "sharpe_ratio": sharpe,
             "sortino_ratio": sortino,
@@ -343,6 +445,8 @@ class MetricsAggregator:
             "fee_tier_distribution": dict(fee_tier_distribution),
             # P1-4: 统一波动字段命名（avg_ret1s_bps作为质量监控指标）
             "avg_ret1s_bps": avg_ret1s_bps,
+            # 多品种公平权重：按symbol聚合的指标
+            "by_symbol": dict(by_symbol),
         }
         
         # Save metrics
@@ -366,15 +470,17 @@ class MetricsAggregator:
         # P0-2: 统一在这里推送Pushgateway指标（包含健康度指标）
         self._export_to_pushgateway(metrics, reader_stats=reader_stats, feeder_stats=feeder_stats, aligner_stats=aligner_stats)
     
-    def _export_to_pushgateway(self, metrics: Dict[str, Any], reader_stats: Optional[Dict[str, Any]] = None, feeder_stats: Optional[Dict[str, Any]] = None) -> None:
+    def _export_to_pushgateway(self, metrics: Dict[str, Any], reader_stats: Optional[Dict[str, Any]] = None, feeder_stats: Optional[Dict[str, Any]] = None, aligner_stats: Optional[Dict[str, Any]] = None) -> None:
         """Export metrics to Prometheus Pushgateway (optional)
         
         P1-5: 同时导出Reader/Feeder健康度指标
+        P1-1: 同时导出Aligner质量指标（质量→收益桥接）
         
         Args:
             metrics: Core backtest metrics
             reader_stats: Reader statistics (optional)
             feeder_stats: Feeder statistics (optional)
+            aligner_stats: Aligner statistics (optional)
         """
         import os
         

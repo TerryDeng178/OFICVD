@@ -1,0 +1,121 @@
+{
+  "description": "最小实验矩阵（2×2×2=8组）",
+  "target": "降频/拉持仓/降成本的合力曲线",
+  "baseline": {
+    "trades_per_hour": 934.0,
+    "avg_hold_sec": 164.0,
+    "cost_bps_on_turnover": 1.93
+  },
+  "experiments": [
+    {
+      "id": "exp_1",
+      "name": "连击3_去重3000_maker标准",
+      "params": {
+        "signal.min_consecutive_same_dir": 3,
+        "signal.dedupe_ms": 3000,
+        "backtest.fee_maker_taker.scenario_probs.Q_L": 0.75,
+        "backtest.fee_maker_taker.scenario_probs.A_L": 0.75,
+        "backtest.fee_maker_taker.scenario_probs.A_H": 0.50,
+        "backtest.fee_maker_taker.scenario_probs.Q_H": 0.40
+      }
+    },
+    {
+      "id": "exp_2",
+      "name": "连击3_去重3000_maker加力",
+      "params": {
+        "signal.min_consecutive_same_dir": 3,
+        "signal.dedupe_ms": 3000,
+        "backtest.fee_maker_taker.scenario_probs.Q_L": 0.80,
+        "backtest.fee_maker_taker.scenario_probs.A_L": 0.80,
+        "backtest.fee_maker_taker.scenario_probs.A_H": 0.50,
+        "backtest.fee_maker_taker.scenario_probs.Q_H": 0.45
+      }
+    },
+    {
+      "id": "exp_3",
+      "name": "连击3_去重5000_maker标准",
+      "params": {
+        "signal.min_consecutive_same_dir": 3,
+        "signal.dedupe_ms": 5000,
+        "backtest.fee_maker_taker.scenario_probs.Q_L": 0.75,
+        "backtest.fee_maker_taker.scenario_probs.A_L": 0.75,
+        "backtest.fee_maker_taker.scenario_probs.A_H": 0.50,
+        "backtest.fee_maker_taker.scenario_probs.Q_H": 0.40
+      }
+    },
+    {
+      "id": "exp_4",
+      "name": "连击3_去重5000_maker加力",
+      "params": {
+        "signal.min_consecutive_same_dir": 3,
+        "signal.dedupe_ms": 5000,
+        "backtest.fee_maker_taker.scenario_probs.Q_L": 0.80,
+        "backtest.fee_maker_taker.scenario_probs.A_L": 0.80,
+        "backtest.fee_maker_taker.scenario_probs.A_H": 0.50,
+        "backtest.fee_maker_taker.scenario_probs.Q_H": 0.45
+      }
+    },
+    {
+      "id": "exp_5",
+      "name": "连击4_去重3000_maker标准",
+      "params": {
+        "signal.min_consecutive_same_dir": 4,
+        "signal.dedupe_ms": 3000,
+        "backtest.fee_maker_taker.scenario_probs.Q_L": 0.75,
+        "backtest.fee_maker_taker.scenario_probs.A_L": 0.75,
+        "backtest.fee_maker_taker.scenario_probs.A_H": 0.50,
+        "backtest.fee_maker_taker.scenario_probs.Q_H": 0.40
+      }
+    },
+    {
+      "id": "exp_6",
+      "name": "连击4_去重3000_maker加力",
+      "params": {
+        "signal.min_consecutive_same_dir": 4,
+        "signal.dedupe_ms": 3000,
+        "backtest.fee_maker_taker.scenario_probs.Q_L": 0.80,
+        "backtest.fee_maker_taker.scenario_probs.A_L": 0.80,
+        "backtest.fee_maker_taker.scenario_probs.A_H": 0.50,
+        "backtest.fee_maker_taker.scenario_probs.Q_H": 0.45
+      }
+    },
+    {
+      "id": "exp_7",
+      "name": "连击4_去重5000_maker标准",
+      "params": {
+        "signal.min_consecutive_same_dir": 4,
+        "signal.dedupe_ms": 5000,
+        "backtest.fee_maker_taker.scenario_probs.Q_L": 0.75,
+        "backtest.fee_maker_taker.scenario_probs.A_L": 0.75,
+        "backtest.fee_maker_taker.scenario_probs.A_H": 0.50,
+        "backtest.fee_maker_taker.scenario_probs.Q_H": 0.40
+      }
+    },
+    {
+      "id": "exp_8",
+      "name": "连击4_去重5000_maker加力",
+      "params": {
+        "signal.min_consecutive_same_dir": 4,
+        "signal.dedupe_ms": 5000,
+        "backtest.fee_maker_taker.scenario_probs.Q_L": 0.80,
+        "backtest.fee_maker_taker.scenario_probs.A_L": 0.80,
+        "backtest.fee_maker_taker.scenario_probs.A_H": 0.50,
+        "backtest.fee_maker_taker.scenario_probs.Q_H": 0.45
+      }
+    }
+  ],
+  "acceptance_criteria": {
+    "trades_per_hour": {
+      "target": "≤基线的20%",
+      "value": 186.8
+    },
+    "avg_hold_sec": {
+      "target": "≥240s",
+      "value": 240
+    },
+    "cost_bps_on_turnover": {
+      "target": "≤1.75bps",
+      "value": 1.75
+    }
+  }
+}

@@ -1,0 +1,48 @@
+# Schema映射表（适配器层）
+# 用于统一字段名映射，确保SSOT键一致
+
+# 时间戳字段
+timestamp_fields:
+  event_ts_ms: ["event_ts_ms", "ts_ms", "timestamp_ms", "event_time_ms"]
+  recv_ts_ms: ["recv_ts_ms", "recv_time_ms", "received_ts_ms"]
+
+# 盘口字段
+book_fields:
+  best_bid: ["best_bid", "bid", "bid_price", "best_bid_price"]
+  best_ask: ["best_ask", "ask", "ask_price", "best_ask_price"]
+  mid_price: ["mid_price", "mid", "midpoint"]
+  spread_bps: ["spread_bps", "spread", "bid_ask_spread_bps"]
+
+# 活动度字段
+activity_fields:
+  trades_per_min: ["trades_per_min", "tpm", "trade_rate", "trades_per_minute"]
+  quote_updates_per_sec: ["quote_updates_per_sec", "qups", "quote_rate", "quote_updates_per_second"]
+
+# 延迟字段
+lag_fields:
+  lag_ms: ["lag_ms", "lag", "event_lag_ms", "delay_ms"]
+  lag_sec: ["lag_sec", "lag_seconds", "event_lag_sec"]
+
+# 模式字段
+mode_fields:
+  regime: ["regime", "mode", "strategy_mode", "market_regime"]
+  activity: ["activity", "market_activity", "activity_level"]
+
+# 默认值
+defaults:
+  event_ts_ms: null
+  recv_ts_ms: null
+  best_bid: null
+  best_ask: null
+  mid_price: null
+  spread_bps: null
+  trades_per_min: 0
+  quote_updates_per_sec: 0
+  lag_ms: 0
+  lag_sec: 0.0
+  regime: "unknown"
+  activity: "unknown"
+
+# Schema版本
+schema_version: "1.0"
+

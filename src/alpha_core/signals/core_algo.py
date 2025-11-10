@@ -613,8 +613,19 @@ class MultiSink(SignalSink):
             sink.emit(entry.copy())
     
     def close(self) -> None:
-        """TASK-07A: 确保所有Sink正确关闭（只调用标准接口，不访问私有属性）"""
-        for sink in self.sinks:
+        """TASK-07A: 确保所有Sink正确关闭（只调用标准接口，不访问私有属性）
+        
+        TASK-07B修复: 优化关闭顺序，先关闭SQLite（确保提交），再关闭JSONL（确保rotate）
+        这样可以减少关闭时序race导致的数据不一致
+        """
+        # TASK-07B: 先关闭SQLite（确保数据提交），再关闭JSONL（确保文件rotate）
+        # 这样可以减少关闭时序race导致的数据不一致
+        sqlite_sinks = [s for s in self.sinks if isinstance(s, SqliteSink)]
+        jsonl_sinks = [s for s in self.sinks if isinstance(s, JsonlSink)]
+        other_sinks = [s for s in self.sinks if s not in sqlite_sinks + jsonl_sinks]
+        
+        # 关闭顺序：其他Sink -> SQLite -> JSONL
+        for sink in other_sinks + sqlite_sinks + jsonl_sinks:
             try:
                 # 只调用标准接口，让每个Sink的close()自行处理内部刷新逻辑
                 sink.close()
@@ -682,6 +693,15 @@ class CoreAlgorithm:
         self._base_dir = base_dir
         self._stats = SignalStats()
         self._last_ts_per_symbol: Dict[str, int] = {}
+        
+        # P0修复: B组回测端重算融合 + 连击确认
+        self.recompute_fusion = bool(self.config.get("recompute_fusion", False))
+        self.min_consecutive_same_dir = int(self.config.get("min_consecutive_same_dir", 1))
+        # 方向streak跟踪: symbol -> (direction, count)
+        self._dir_streak_state: Dict[str, tuple] = {}  # symbol -> (last_direction, consecutive_count)
+        
+        if self.recompute_fusion:
+            logger.info(f"[CoreAlgorithm] 回测端重算融合已启用: recompute_fusion=True, min_consecutive_same_dir={self.min_consecutive_same_dir}")
         
         # P0: StrategyMode 可观测性（每 10s 心跳快照）
         self._last_strategy_mode_log_per_symbol: Dict[str, int] = {}
@@ -821,6 +841,15 @@ class CoreAlgorithm:
             candidate_direction = -1
 
         confirm = candidate_direction != 0 and not gating_reasons
+        
+        # P0修复: B组连击确认（避免一跳即确认）
+        if confirm and self.min_consecutive_same_dir > 1:
+            streak = self._get_dir_streak(symbol, score)
+            if streak < self.min_consecutive_same_dir:
+                confirm = False
+                gating_reasons.append(f"reverse_cooldown_insufficient_ticks({streak}<{self.min_consecutive_same_dir})")
+                self._stats.suppressed += 1
+        
         signal_type = "neutral"
         if confirm:
             if candidate_direction > 0:
@@ -845,9 +874,11 @@ class CoreAlgorithm:
             "regime": regime,
             "div_type": row.get("div_type"),
             "confirm": confirm,
-            "gating": bool(gating_reasons),
+            "gating": bool(gating_reasons),  # 兼容旧字段
+            "gating_blocked": bool(gating_reasons),  # 修复C: 明确语义 - gating_blocked=True表示"被门控阻止"
             "signal_type": signal_type,
-            "guard_reason": ",".join(gating_reasons) if gating_reasons else None,  # 保存所有原因（逗号分隔）
+            "gate_reason": ",".join(gating_reasons) if gating_reasons else None,  # 修复C: 统一字段名为gate_reason
+            "guard_reason": ",".join(gating_reasons) if gating_reasons else None,  # 兼容旧字段
             "run_id": run_id,
             "created_at": created_at,  # P1: 与SQLite的created_at对齐
         }
@@ -873,10 +904,20 @@ class CoreAlgorithm:
         return emitted
 
     def _validate_row(self, row: Dict[str, Any]) -> bool:
-        missing = [field for field in REQUIRED_FIELDS if field not in row]
-        if missing:
-            logger.warning("feature row missing fields: %s", missing)
+        # 检查关键字段（ts_ms, symbol, z_ofi, z_cvd）必须存在且不为None
+        # 其他字段（lag_sec, consistency, warmup, spread_bps）如果缺失，使用默认值
+        critical_fields = ["ts_ms", "symbol", "z_ofi", "z_cvd"]
+        missing_critical = [field for field in critical_fields if field not in row or row.get(field) is None]
+        if missing_critical:
+            logger.warning("feature row missing critical fields: %s", missing_critical)
             return False
+        
+        # 其他字段如果缺失，记录警告但不阻止处理（会在process_feature_row中使用默认值）
+        optional_fields = ["lag_sec", "consistency", "warmup", "spread_bps"]
+        missing_optional = [field for field in optional_fields if field not in row or row.get(field) is None]
+        if missing_optional:
+            logger.debug("feature row missing optional fields (will use defaults): %s", missing_optional)
+        
         return True
 
     def _is_duplicate(self, symbol: str, ts_ms: int) -> bool:
@@ -889,17 +930,41 @@ class CoreAlgorithm:
         return False
 
     def _resolve_score(self, row: Dict[str, Any]) -> float:
+        """解析融合分数
+        
+        P0修复: 如果recompute_fusion启用，强制重算融合分数
+        """
         score = row.get("fusion_score")
-        if score is not None:
-            return float(score)
-        w_ofi = self.config["weights"].get("w_ofi", 0.6)
-        w_cvd = self.config["weights"].get("w_cvd", 0.4)
-        # 处理 None 值（Parquet 文件可能包含 None）
-        z_ofi_val = row.get("z_ofi")
-        z_cvd_val = row.get("z_cvd")
-        ofi = float(z_ofi_val if z_ofi_val is not None else 0.0)
-        cvd = float(z_cvd_val if z_cvd_val is not None else 0.0)
-        return w_ofi * ofi + w_cvd * cvd
+        if self.recompute_fusion or score is None:
+            # 回测端重算融合分数
+            w_ofi = self.config["weights"].get("w_ofi", 0.6)
+            w_cvd = self.config["weights"].get("w_cvd", 0.4)
+            # 处理 None 值（Parquet 文件可能包含 None）
+            z_ofi_val = row.get("z_ofi")
+            z_cvd_val = row.get("z_cvd")
+            ofi = float(z_ofi_val if z_ofi_val is not None else 0.0)
+            cvd = float(z_cvd_val if z_cvd_val is not None else 0.0)
+            return w_ofi * ofi + w_cvd * cvd
+        return float(score)
+    
+    def _get_dir_streak(self, symbol: str, score: float) -> int:
+        """计算方向streak（连续同向tick数）
+        
+        P0修复: B组连击确认逻辑
+        """
+        direction = 1 if score > 0 else (-1 if score < 0 else 0)
+        if symbol not in self._dir_streak_state:
+            self._dir_streak_state[symbol] = (direction, 1)
+            return 1
+        
+        last_dir, count = self._dir_streak_state[symbol]
+        if direction == last_dir and direction != 0:
+            count += 1
+        else:
+            count = 1 if direction != 0 else 0
+        
+        self._dir_streak_state[symbol] = (direction, count)
+        return count
 
     def _get_strategy_mode_manager(self, symbol: str) -> Optional[StrategyModeManager]:
         """Get or create StrategyModeManager for a symbol."""
