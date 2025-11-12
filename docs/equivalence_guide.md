@@ -256,6 +256,33 @@ diff -u runtime/equiv_test_1/equiv_result_*.json runtime/equiv_test_2/equiv_resu
 2. 给出"差异解释 + 恢复计划"
 3. 明确时间表
 
+## 防回归硬化（Regression Hardening）
+
+### 跨平台矩阵测试
+等价性测试在以下环境矩阵中执行，确保平台/版本兼容性：
+- **OS**: Ubuntu-latest, Windows-latest
+- **Python**: 3.11, 3.12
+
+### 依赖锁定
+- 使用 `constraints.txt` 冻结传递依赖版本
+- 安装命令: `pip install -e ".[dev]" -c constraints.txt`
+- 防止上游依赖版本波动导致的回归
+
+### 跳过机制加锁
+- 需要 `skip-equivalence` 标签 **且** CODEOWNERS 审批
+- 允许用户列表: `terrydeng178, repo-owner`
+- 确保紧急修复时的可控性
+
+### CI 调试工件
+- 自动上传测试报告: `reports/junit.xml`
+- 自动上传对比明细: `runtime/equiv_test/equiv_diff_*.json`
+- 失败时可一键下载复盘差异
+
+### CI 配置优化
+- CI 中使用 `-v` 详细输出，便于调试
+- 矩阵测试失败时仍保留其他平台的 artifact
+- 并发控制: 同一分支同时只能运行一个等价性测试
+
 ## Definition of Done (DoD)
 
 - [x] 回放 vs 回测：成交、费用、仓位、PNL 在样本集 \|Δ\| < 1e-8
@@ -264,6 +291,7 @@ diff -u runtime/equiv_test_1/equiv_result_*.json runtime/equiv_test_2/equiv_resu
 - [x] 幂等：同 (symbol, ts_ms) 仅保留 1 条候选（含单测）
 - [x] CI 门闸：pytest -k equivalence 纳入必过检查，合并前自动执行
 - [x] 文档：本文档完整说明数据准备、命令示例、阈值、常见偏差解释
+- [x] 防回归硬化：跨平台矩阵、依赖锁定、跳过加锁、调试工件
 
 ## 参考
 

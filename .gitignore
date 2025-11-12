@@ -63,3 +63,6 @@ runtime/
 *.ndjson
 *.sidecar.json
 
+# Dependency constraints (generated file)
+constraints.txt
+
