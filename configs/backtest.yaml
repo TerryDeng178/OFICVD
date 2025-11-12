@@ -1,0 +1,62 @@
+# TASK-B2: 回测配置文件示例
+# 用于独立回测的策略、闸门和撮合仿真参数
+
+# 信号相关配置（与CoreAlgorithm对齐）
+signal:
+  thresholds:
+    base: 0.1
+    regime_quiet: 0.05
+    regime_trend: 0.15
+    consistency_min_per_regime:
+      quiet: 0.3
+      trend: 0.2
+    consistency_floor: 0.1
+    consistency_floor_on_divergence: 0.05
+
+  # OFI/CVD参数（与线上一致）
+  ofi:
+    window_ms: 1000
+    lambda_decay: 0.9
+
+  cvd:
+    window_ms: 5000
+    lambda_decay: 0.95
+
+  # 融合参数
+  fusion:
+    weight_ofi: 0.6
+    weight_cvd: 0.4
+
+# 经纪商撮合仿真配置
+broker:
+  # 手续费率（bps，负数表示返佣）
+  fee_bps_maker: -25    # 做市商返佣 -0.25%
+  fee_bps_taker: 75     # 吃单手续费 0.75%
+
+  # 滑点模型
+  slippage_bps: 5.0     # 固定滑点 0.05%
+
+  # 撮合延迟
+  latency_ms: 50        # 撮合延迟50ms
+
+  # 撮合规则
+  maker_first: true     # 优先maker订单
+  min_order_qty: 0.001  # 最小订单量
+  max_order_qty: 1.0    # 最大订单量
+
+# 风控配置
+risk:
+  max_position_btc: 0.1    # 最大BTC持仓
+  max_daily_trades: 100    # 每日最大交易次数
+  cooldown_ms: 1000        # 订单冷却时间
+
+# 观测性配置
+observability:
+  heartbeat_interval_s: 60    # 心跳间隔
+  progress_update_s: 10       # 进度更新间隔
+  log_level: INFO
+
+# 产物配置
+output:
+  emit_sqlite: false      # 是否同时输出SQLite格式
+  compress_jsonl: false   # 是否压缩JSONL文件

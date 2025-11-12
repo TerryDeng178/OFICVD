@@ -1,0 +1,17 @@
+{
+  "params": {
+    "scenario_overrides.active_high.components.fusion.min_consecutive": [
+      4,
+      5
+    ],
+    "scenario_overrides.active_high.signal.weak_signal_threshold": [
+      0.78,
+      0.8
+    ],
+    "scenario_overrides.active_high.signal.consistency_min": [
+      0.55,
+      0.57
+    ]
+  },
+  "max_trials": 60
+}

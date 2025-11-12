@@ -1,0 +1,15 @@
+{
+  "params": {
+    "execution.flip_rearm_margin": [
+      0.5,
+      0.8,
+      1.0
+    ],
+    "execution.cooldown_after_exit_sec": [
+      60,
+      120,
+      180
+    ]
+  },
+  "max_trials": 120
+}

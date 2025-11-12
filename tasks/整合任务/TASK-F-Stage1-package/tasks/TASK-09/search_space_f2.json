@@ -1,0 +1,33 @@
+{
+  "params": {
+    "components.fusion.w_ofi": [
+      0.7,
+      0.6,
+      0.5
+    ],
+    "components.fusion.w_cvd": [
+      0.3,
+      0.4,
+      0.5
+    ],
+    "thresholds.active.buy": [
+      1.2,
+      1.5,
+      1.8
+    ],
+    "thresholds.active.sell": [
+      1.2,
+      1.5,
+      1.8
+    ],
+    "execution.adaptive_cooldown_k": [
+      0.8,
+      1.0,
+      1.2
+    ]
+  },
+  "constraints": [
+    "components.fusion.w_ofi + components.fusion.w_cvd == 1.0"
+  ],
+  "max_trials": 200
+}

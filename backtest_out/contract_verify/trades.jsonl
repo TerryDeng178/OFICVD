@@ -1,0 +1,2 @@
+{"ts_ms": 1762905600100, "symbol": "BTCUSDT", "side": "BUY", "exec_px": 50000.0, "qty": 0.001, "maker": true, "fee_bps": -25, "slip_bps": 0.0, "lat_ms": 100, "reason": "signal_confirmed", "order_id": "bt_1762905600000", "position_id": "bt_pos_1", "turnover": 50.0, "fee_abs": 0.125}
+{"ts_ms": 1762905660100, "symbol": "BTCUSDT", "side": "SELL", "exec_px": 51000.0, "qty": 0.001, "maker": true, "fee_bps": -25, "slip_bps": 0.0, "lat_ms": 100, "reason": "signal_confirmed", "order_id": "bt_1762905660000", "position_id": "bt_pos_1", "turnover": 51.0, "fee_abs": 0.1275}

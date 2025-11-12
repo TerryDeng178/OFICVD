@@ -625,6 +625,43 @@ python -m mcp.harvest_server.app --config ./config/defaults.yaml
 
 ---
 
+## 🎯 TASK-B2: 独立回测模式
+
+✅ **已完成**: 实现了完整的独立回测框架，支持两种运行模式：
+
+### 模式说明
+- **模式A**: 全量重算（features → signals → trades/pnl）
+- **模式B**: 信号复现（signals → trades/pnl）
+
+### 快速开始
+
+```bash
+# 模式B: 从现有signals运行回测
+./scripts/run_backtest.sh B jsonl://./runtime/signals ./configs/backtest.yaml --symbols BTCUSDT
+
+# 模式A: 从features数据重算（需要历史数据）
+./scripts/run_backtest.sh A ./data/features ./configs/backtest.yaml --symbols BTCUSDT,ETHUSDT
+```
+
+### 产物输出
+```
+backtest_out/<RUN_ID>/
+├── signals.jsonl      # 信号数据（模式A）
+├── trades.jsonl       # 交易记录
+├── pnl_daily.jsonl    # 日收益统计
+└── run_manifest.json  # 运行清单
+```
+
+### 测试验证
+```bash
+# 运行完整测试套件
+python -m pytest tests/test_backtest_* -v
+
+# 结果: 21 passed ✅ (单元9 + 集成3 + E2E9 + 等价性/确定性工具)
+```
+
+---
+
 ## 9) 许可证与贡献
 - 内部项目默认私有；如需开源，建议采用 Apache-2.0 并在 `NOTICE` 中标注外部依赖。  
 - 提交 PR 前请同步更新：`README`、`docs/api_contracts.md`、相关任务卡。
