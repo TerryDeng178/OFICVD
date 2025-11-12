@@ -1,0 +1,51 @@
+name: equivalence-ci
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'mcp/**'
+      - 'tests/**'
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+  workflow_dispatch:
+
+jobs:
+  equivalence:
+    # 仅维护者可用：给 PR 打上 skip-equivalence 标签可跳过
+    if: ${{ !contains(toJson(github.event.pull_request.labels), 'skip-equivalence') }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # 轻量级等价性用例（样例夹具、无外部服务）
+      - name: Run equivalence tests (light)
+        run: |
+          mkdir -p reports
+          python -m pytest -m "equivalence and not slow" \
+            --maxfail=1 --disable-warnings \
+            --junitxml=reports/junit.xml
+        env:
+          V13_REPLAY_MODE: "1"   # 回放一致性
+          CI_MODE: "light"       # 测试用小样例/快速路径
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: equivalence-reports
+          path: reports/
+

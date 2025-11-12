@@ -1,0 +1,39 @@
+name: equivalence-nightly
+
+on:
+  schedule:
+    - cron: '30 18 * * *'   # 每日 03:30 JST（GitHub 用 UTC；18:30+9h=03:30）
+  workflow_dispatch:
+
+jobs:
+  full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run equivalence tests (full)
+        run: |
+          mkdir -p reports
+          python -m pytest -m equivalence \
+            --maxfail=1 --disable-warnings \
+            --junitxml=reports/junit.xml
+        env:
+          V13_REPLAY_MODE: "1"
+          CI_MODE: "full"      # 大样本/长窗；用慢用例和更多品种
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: equivalence-nightly-reports
+          path: reports/
+
