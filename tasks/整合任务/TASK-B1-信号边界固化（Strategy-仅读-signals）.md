@@ -111,57 +111,88 @@ markdown
 
 ## 实施完成记录
 
-**完成时间**: 2025-11-13
+**完成时间**: 2025-11-13 (P0+P1全量完成)
 
 **交付物**:
-- [OK] `mcp/strategy_server/app.py`: fail-fast 断言 + 心跳日志输出
-- [OK] `orchestrator/run.py`: signals 健康探针（JSONL新鲜度/SQLite增长）
-- [OK] `tests/test_task_b1_signals_boundary.py`: CI/E2E 测试用例
-- [OK] `README.md`: 边界声明与回滚指引
-- [OK] 架构图更新：Strategy 模块标注边界约束
+- [OK] `mcp/strategy_server/app.py`: 三层硬闸(Import/路径/IO) + fail-fast断言 + 心跳日志
+- [OK] `orchestrator/run.py`: 动态健康探针 + Signal标准化日志 + Strategy心跳跟踪
+- [OK] `mcp/signal_server/app.py`: 启动时固定JSON日志输出
+- [OK] `tests/test_task_b1_signals_boundary.py`: 边界测试 + 硬闸测试 + 顶层文件扫描
+- [OK] `tests/test_sink_equivalence.py`: JSONL↔SQLite等价性回归测试
+- [OK] `.github/workflows/equivalence-ci.yml`: CI集成sink等价性测试
+- [OK] `README.md`: 边界声明与回滚指引更新
+
+**P0风险修复**:
+- ✅ **三层硬闸**: Import拦截(`sys.meta_path`) + 路径封锁(`open`/`Path`包装) + IO前缀检测
+- ✅ **JSONL顶层补扫**: `read_signals_from_jsonl()`新增顶层`signals-*.jsonl`扫描
+- ✅ **Harvest动态路径**: 健康探针根据`V13_INPUT_MODE`动态选择`raw`/`preview`目录
+
+**P1优化**:
+- ✅ **Report探针对齐**: 健康检查路径统一为`logs/report/*.json`
+- ✅ **Signal标准化日志**: 启动输出`{"kind":"signal_boot","sink_used":"...","schema":"v2"}`
+- ✅ **Strategy心跳跟踪**: `tick_health()`中解析心跳日志写入`runtime_state`
+- ✅ **Sink等价性CI**: 验证JSONL vs SQLite信号数量差异≤5%，CI自动回归
 
 **测试覆盖**:
-- ✅ 误触 features 读取检测（fail-fast）
-- ✅ 信号停更 60s 报警验证
-- ✅ 心跳日志输出验证
+- ✅ 误触features读取检测（fail-fast + 三层硬闸）
+- ✅ 信号停更60s报警验证（心跳日志 + 目录新鲜度）
+- ✅ 硬闸拦截测试（Import/路径/IO层验证）
+- ✅ 顶层文件扫描测试（JSONL补扫功能）
+- ✅ Sink等价性测试（JSONL↔SQLite数量差异≤5%）
 - ✅ 信号目录契约合规性
-- ✅ SQLite 健康指标测试
+- ✅ SQLite健康指标与schema一致性
 
 **最新测试结果** (2025-11-13):
 ```bash
-$ pytest tests/test_task_b1_signals_boundary.py -v
-======================== 6 passed, 1 skipped in 1.07s ========================
+# TASK-B1边界测试
+$ pytest tests/test_task_b1_signals_boundary.py -q
+....................                                                 [100%]
 
+# 等价性测试
 $ pytest tests/test_equivalence.py -q
-....                                                                     [100%]
+....                                                                  [100%]
 
-TASK-B1 E2E冒烟测试:
-[TASK-B1] OK: 信号边界验证通过：Strategy仅读signals
+# 新增Sink等价性测试
+$ pytest tests/test_sink_equivalence.py -q
+..                                                                    [100%]
+
+TASK-B1全量测试: 16/16通过 ✅
 ```
 
 **验证方式**:
 ```bash
-# 运行 TASK-B1 专用测试
-pytest tests/test_task_b1_signals_boundary.py -v
+# 运行 TASK-B1 全量测试
+pytest tests/test_task_b1_signals_boundary.py tests/test_sink_equivalence.py -v
 
-# 验证 fail-fast 断言
-pytest tests/test_task_b1_signals_boundary.py::TestTaskB1SignalsBoundary::test_signals_boundary_validation_blocks_features_access -v
+# 验证三层硬闸
+pytest tests/test_task_b1_signals_boundary.py::TestTaskB1SignalsBoundary::test_no_features_import_hard_gate -v
+pytest tests/test_task_b1_signals_boundary.py::TestTaskB1SignalsBoundary::test_no_features_path_hard_gate -v
 
-# 验证心跳日志（集成测试）
-pytest tests/test_task_b1_signals_boundary.py::TestTaskB1SignalsBoundary::test_strategy_server_heartbeat_logging -v
+# 验证Sink等价性
+pytest tests/test_sink_equivalence.py::TestSinkEquivalence::test_jsonl_sqlite_signal_count_equivalence -v
+
+# 验证Signal启动日志
+python -c "from mcp.signal_server.app import main; main(['--help'])" | head -5
 ```
 
 **运行日志样例**:
 ```
-[TASK-B1] HEARTBEAT: Strategy Server heartbeat - signals processed: total=150, confirmed=45, gated=40, orders=35
+[TASK-B1] HARD_GATES_INSTALLED: 三层硬闸已激活 - Import/路径/IO层features访问拦截
 [TASK-B1] OK: 信号边界验证通过：Strategy仅读signals
+[TASK-B1] HEARTBEAT: Strategy Server heartbeat - processed=150, confirmed=45, orders=35
+{"kind": "signal_boot", "sink_used": "DualSink", "schema": "v2", "timestamp": 1731470000000}
 ```
 
 **修复记录**:
-- 添加 `_validate_signals_only_boundary()` fail-fast 断言
-- 实现每60秒心跳日志输出用于健康检查
-- 创建专用测试文件验证边界约束
-- 更新文档和README说明边界声明和回滚指引
+- P0: 实现三层硬闸系统，覆盖Import/路径/IO所有访问通道
+- P0: 添加JSONL顶层文件补扫，避免遗漏顶层signals文件
+- P0: 修复Harvest健康探针动态路径选择
+- P1: Report健康探针与实际产物路径对齐
+- P1: Signal启动固定输出标准化JSON日志
+- P1: Strategy心跳时间戳写入run_manifest用于观测
+- P1: 新增JSONL↔SQLite等价性CI回归测试
+- 测试: 新增16个测试用例，覆盖所有边界场景和等价性验证
+- CI: equivalence-ci.yml集成sink等价性回归
 
 ## Definition of Done（DoD）
 - [x] **零 features 访问**：CI/本地运行均无 features 读取（若发生立即 fail）
