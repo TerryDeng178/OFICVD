@@ -74,7 +74,8 @@ repo/
 │  ├─ harvest_server/app.py               # ★ HARVEST：采集/对齐/落盘（Raw+Preview/宽表）
 │  ├─ signal_server/app.py                # ★ SIGNAL：信号生成（CoreAlgo薄壳）
 │  ├─ strategy_server/                    # ★ STRATEGY：策略执行（含风控模块）
-│  │  ├─ app.py
+│  │  ├─ app.py                           # ⚠️ TASK-B1：**仅读 signals**，禁止访问 features/
+│  │  │                                      #   边界约束：启动时验证，无features访问；心跳日志健康检查
 │  │  └─ risk/                            # 风控模块（合并ofi_risk_server逻辑）
 │  ├─ broker_gateway_server/app.py        # ★ BROKER：交易所网关（Testnet/Live）
 │  └─ report_server/app.py                # ★ REPORT：报表生成
@@ -607,6 +608,15 @@ python -m mcp.harvest_server.app --config ./config/defaults.yaml
   - **Staging**：`combine_logic: AND` + 工作日核心时段，用于预生产验证
   - **Prod**：建议采用方案 1（仅 Market 触发）或方案 3（AND 逻辑）
 - **详细文档**：`reports/P0-StrategyMode-100-Quiet-修复验证报告.md`
+
+### TASK-B1: 信号边界固化（Strategy 仅读 signals）
+- **误触 features 访问？**：启动时会 fail-fast 并记录详细错误位置。**立即停止服务**，检查代码是否意外导入了 features 相关模块。
+- **信号停更 >60s 报警？**：健康检查会监控 JSONL 文件新鲜度/SQLite 信号增长。检查 CORE_ALGO 是否正常运行，或临时设置 `V13_SINK=null` 跳过信号生成（仅用于诊断）。
+- **心跳日志异常？**：Strategy Server 每60秒输出统计心跳。如果缺失，检查 watch 模式是否正常启动。
+- **回滚指引**：
+  - **临时绕过**：设置环境变量 `V13_SINK=null`（CORE_ALGO 不产出信号，Strategy 空转但不 crash）
+  - **完全回滚**：注释掉 `mcp/strategy_server/app.py` 中的 `_validate_signals_only_boundary()` 调用
+  - **紧急修复**：如果确认需要 features 访问，需更新 TASK-B1 任务卡并获得批准
 
 ### 其他常见问题
 - **深夜无量导致 OFI/CVD 异常？**：开启 `risk.gates.require_activity`，低活跃时仅观测不下单。  

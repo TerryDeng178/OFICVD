@@ -30,6 +30,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _validate_signals_only_boundary() -> None:
+    """TASK-B1: 信号边界固化 - fail-fast 断言
+
+    确保Strategy层只读signals，禁止任何features访问。
+    此断言在启动时执行，如果发现features相关代码立即退出。
+    """
+    import inspect
+
+    # 检查当前调用栈中是否有features相关的导入或访问
+    current_frame = inspect.currentframe()
+    try:
+        while current_frame:
+            frame_info = inspect.getframeinfo(current_frame)
+            source_lines = frame_info.code_context or []
+
+            for line in source_lines:
+                line_lower = line.lower().strip()
+                # 检查是否包含features路径访问
+                if any(keyword in line_lower for keyword in [
+                    'features/', 'features\\', '/features', '\\features',
+                    'from features', 'import features'
+                ]):
+                    logger.error(f"[TASK-B1] ❌ 检测到禁止的features访问: {line.strip()}")
+                    logger.error(f"[TASK-B1] ❌ 文件: {frame_info.filename}:{frame_info.lineno}")
+                    logger.error("[TASK-B1] ❌ Strategy层必须只读signals，禁止访问features")
+                    sys.exit(1)
+
+            current_frame = current_frame.f_back
+    finally:
+        del current_frame
+
+    logger.info("[TASK-B1] ✅ 信号边界验证通过：Strategy仅读signals")
+
+
 def load_config(config_path: Optional[str]) -> Dict:
     """加载配置文件"""
     if not config_path:
@@ -483,13 +517,17 @@ def main():
     
     # 加载配置
     cfg = load_config(args.config)
-    
+
+    # TASK-B1: 信号边界固化 - 验证Strategy仅读signals
+    logger.info("[TASK-B1] 🔍 执行信号边界验证...")
+    _validate_signals_only_boundary()
+
     # 确定执行模式
     executor_cfg = cfg.get("executor", {})
     if args.mode:
         executor_cfg["mode"] = args.mode
     mode = executor_cfg.get("mode", "backtest")
-    
+
     # 创建执行器
     logger.info(f"[StrategyServer] Creating {mode} executor...")
     executor = create_executor(mode, cfg)
@@ -586,9 +624,22 @@ def main():
         }
         
         logger.info("[StrategyServer] Strategy Server started and ready (watch mode)")
-        
+
+        # TASK-B1: 信号边界固化 - 心跳日志用于健康检查
+        last_heartbeat = 0
+
         while running:
             try:
+                # TASK-B1: 每分钟输出心跳日志，用于健康检查
+                current_time = time.time()
+                if current_time - last_heartbeat >= 60:  # 每60秒输出一次心跳
+                    logger.info("[TASK-B1] 💓 Strategy Server heartbeat - signals processed: "
+                               f"total={cumulative_stats['total_signals']}, "
+                               f"confirmed={cumulative_stats['confirmed_signals']}, "
+                               f"gated={cumulative_stats['gated_signals']}, "
+                               f"orders={cumulative_stats['orders_submitted']}")
+                    last_heartbeat = current_time
+
                 # 读取新信号
                 if signals_source == "sqlite":
                     db_path = output_dir / "signals_v2.db"
