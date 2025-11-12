@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import json
 import logging
 import signal as signal_module
@@ -29,6 +30,71 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+class _FeaturesImportGuard:
+    """TASK-B1: Import层硬闸 - 拦截features包导入"""
+
+    def __init__(self):
+        self.blocked_patterns = ['features', 'features.']
+
+    def find_spec(self, fullname, path, target=None):
+        """拦截模块导入"""
+        if any(fullname.startswith(pattern) for pattern in self.blocked_patterns):
+            logger.error(f"[TASK-B1] BLOCKED_IMPORT: 禁止导入features相关模块: {fullname}")
+            raise ImportError(f"[TASK-B1] TASK_B1_BOUNDARY_VIOLATION: Strategy层禁止访问features: {fullname}")
+        return None
+
+class _PathAccessGuard:
+    """TASK-B1: 路径层硬闸 - 检测文件系统访问"""
+
+    def __init__(self):
+        self.blocked_patterns = ['features', 'features/', 'features\\', '/features', '\\features']
+
+    def _check_path_blocked(self, path_str: str) -> bool:
+        """检查路径是否被阻塞"""
+        path_lower = path_str.lower()
+        return any(pattern in path_lower for pattern in self.blocked_patterns)
+
+    def patched_open(self, original_open):
+        """包装open函数"""
+        def wrapper(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None):
+            if self._check_path_blocked(str(file)):
+                logger.error(f"[TASK-B1] BLOCKED_PATH: 禁止访问features路径: {file}")
+                raise PermissionError(f"[TASK-B1] TASK_B1_BOUNDARY_VIOLATION: Strategy层禁止访问features路径: {file}")
+            return original_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
+        return wrapper
+
+    def patched_path_init(self, original_init):
+        """包装Path.__init__"""
+        def wrapper(self, *args, **kwargs):
+            result = original_init(self, *args, **kwargs)
+            path_str = str(self)
+            if self._check_path_blocked(path_str):
+                logger.error(f"[TASK-B1] BLOCKED_PATH: 禁止访问features路径: {path_str}")
+                raise PermissionError(f"[TASK-B1] TASK_B1_BOUNDARY_VIOLATION: Strategy层禁止访问features路径: {path_str}")
+            return result
+        return wrapper
+
+def _install_boundary_hard_gates():
+    """TASK-B1: 安装三层硬闸 - Import/路径/IO"""
+    # 1. Import层：注册meta_path拦截器
+    import_guard = _FeaturesImportGuard()
+    sys.meta_path.insert(0, import_guard)
+
+    # 2. IO层：包装open函数
+    path_guard = _PathAccessGuard()
+    original_open = open
+    builtins.open = path_guard.patched_open(original_open)
+
+    # 3. 路径层：包装Path初始化（如果可用）
+    try:
+        from pathlib import Path
+        original_path_init = Path.__init__
+        Path.__init__ = path_guard.patched_path_init(original_path_init)
+    except ImportError:
+        pass  # Python < 3.4 没有pathlib
+
+    logger.info("[TASK-B1] HARD_GATES_INSTALLED: 三层硬闸已激活 - Import/路径/IO层features访问拦截")
 
 def _validate_signals_only_boundary() -> None:
     """TASK-B1: 信号边界固化 - fail-fast 断言
@@ -101,16 +167,46 @@ def read_signals_from_jsonl(signals_dir: Path, symbols: Optional[list] = None, p
     if last_positions is None:
         last_positions = {}
     
+    # TASK-B1: 补扫顶层signals文件（P0修复）
+    # 先处理顶层signals-*.jsonl / signals_*.jsonl文件
+    top_level_files_v2 = sorted(signals_dir.glob("signals-*.jsonl"))
+    top_level_files_v1 = sorted(signals_dir.glob("signals_*.jsonl"))
+    top_level_files = top_level_files_v2 + top_level_files_v1
+
+    for jsonl_file in top_level_files:
+        file_key = str(jsonl_file)
+        try:
+            with jsonl_file.open("r", encoding="utf-8") as f:
+                # 如果是增量读取，跳转到上次位置
+                if file_key in last_positions:
+                    f.seek(last_positions[file_key])
+
+                # 读取新内容
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    signal = json.loads(line)
+                    yield signal
+
+                # 更新最后位置
+                if processed_files is not None:
+                    processed_files.add(file_key)
+
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logger.warning(f"Error reading top-level JSONL file {jsonl_file}: {e}")
+            continue
+
     # 查找所有JSONL文件（兼容v2和v1命名）
     if symbols:
         symbol_dirs = [signals_dir / symbol.upper() for symbol in symbols]
     else:
         symbol_dirs = [d for d in signals_dir.iterdir() if d.is_dir()]
-    
+
     for symbol_dir in symbol_dirs:
         if not symbol_dir.exists():
             continue
-        
+
         # TASK-A4优化：同时匹配v2格式（signals-*.jsonl）和v1格式（signals_*.jsonl）
         # 优先v2格式（新标准），然后兼容v1格式
         jsonl_files_v2 = sorted(symbol_dir.glob("signals-*.jsonl"))
@@ -517,6 +613,10 @@ def main():
     
     # 加载配置
     cfg = load_config(args.config)
+
+    # TASK-B1: 信号边界固化 - 安装三层硬闸
+    logger.info("[TASK-B1] INSTALLING_HARD_GATES: 安装Import/路径/IO三层硬闸...")
+    _install_boundary_hard_gates()
 
     # TASK-B1: 信号边界固化 - 验证Strategy仅读signals
     logger.info("[TASK-B1] CHECK: 执行信号边界验证...")

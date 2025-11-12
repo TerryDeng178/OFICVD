@@ -2155,7 +2155,14 @@ def build_process_specs(
         logger.warning(f"[config.validation] 配置校验失败: {e}，将继续使用配置")
     
     specs = []
-    
+
+    # TASK-B1 P0: Harvest健康探针动态路径选择
+    # 根据 input_mode 动态计算正确的路径，避免写死在raw
+    input_mode = os.getenv("V13_INPUT_MODE", "raw")
+    from alpha_core.common.paths import get_data_root
+    harvest_data_root = get_data_root(input_mode)
+    harvest_pattern = str(harvest_data_root / "**" / "*.parquet")
+
     # Harvest Server
     harvest_spec = ProcessSpec(
         name="harvest",
@@ -2165,8 +2172,8 @@ def build_process_specs(
         ready_probe_args={"keywords": ["harvest.start", "已加载配置文件", "最终使用的交易对数量"]},  # 检查启动日志（支持 JSON 和文本格式）
         health_probe="file_count",
         health_probe_args={
-            # 修复：harvester 输出的是 .parquet 文件，不是 .jsonl
-            "pattern": "deploy/data/ofi_cvd/raw/**/*.parquet",
+            # TASK-B1 P0: 动态路径 - 根据input_mode选择raw或preview目录
+            "pattern": harvest_pattern,
             "min_count": 1,
             # P0: 健康检查在 smoke/回放场景放宽时间窗口要求
             # 如果使用历史数据或回放模式，不要求文件在最近120秒内修改
@@ -2261,13 +2268,16 @@ def build_process_specs(
         # 如果无法计算相对路径，使用绝对路径（会在探针中处理）
         output_dir_rel = output_dir
     
-    # P0: 双 Sink 模式下，就绪探针检查 JSONL 文件
+    # P1: Signal SQLite就绪探针对v2兼容 - 优先signals_v2.db，回退signals.db
     if sink_kind == "dual":
         signal_ready_args = {"pattern": str(output_dir_rel / "ready" / "signal" / "**" / "*.jsonl")}
     elif sink_kind == "jsonl":
         signal_ready_args = {"pattern": str(output_dir_rel / "ready" / "signal" / "**" / "*.jsonl")}
     else:
-        signal_ready_args = {"db_path": str(output_dir_rel / "signals.db")}
+        # TASK-B1 P1: 优先尝试v2数据库
+        v2_db_path = output_dir_rel / "signals_v2.db"
+        v1_db_path = output_dir_rel / "signals.db"
+        signal_ready_args = {"db_path": str(v2_db_path) if (output_dir / "signals_v2.db").exists() else str(v1_db_path)}
     
     # P0: 健康/就绪探针基线分环境配置
     # 实时场景：保持现有时间窗口检查

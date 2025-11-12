@@ -182,3 +182,55 @@ class TestTaskB1SignalsBoundary:
         count = cursor.fetchone()[0]
         assert count == 2, f"期望2条确认信号，实际{count}条"
         conn.close()
+
+    def test_no_features_import_hard_gate(self):
+        """测试三层硬闸：Import层拦截"""
+        from mcp.strategy_server.app import _FeaturesImportGuard
+
+        guard = _FeaturesImportGuard()
+
+        # 测试正常导入
+        assert guard.find_spec("os", None) is None  # 不拦截正常模块
+
+        # 测试拦截features
+        with pytest.raises(ImportError, match="TASK_B1_BOUNDARY_VIOLATION.*Strategy层禁止访问features"):
+            guard.find_spec("features.some_module", None)
+
+    def test_no_features_path_hard_gate(self):
+        """测试三层硬闸：路径层拦截"""
+        from mcp.strategy_server.app import _PathAccessGuard
+
+        guard = _PathAccessGuard()
+
+        # 测试正常路径
+        assert not guard._check_path_blocked("/normal/path/file.txt")
+
+        # 测试拦截features路径
+        assert guard._check_path_blocked("features/file.txt")
+        assert guard._check_path_blocked("/path/to/features/data.json")
+        assert guard._check_path_blocked("some\\features\\config.yaml")
+
+    @pytest.mark.integration
+    def test_jsonl_top_level_files_scanned(self, tmp_path):
+        """集成测试：JSONL顶层文件被正确扫描"""
+        from mcp.strategy_server.app import read_signals_from_jsonl
+
+        signals_dir = tmp_path / "ready" / "signal"
+
+        # 创建顶层signals文件
+        top_level_file = signals_dir / "signals-20241113-10.jsonl"
+        top_level_file.parent.mkdir(parents=True, exist_ok=True)
+        top_level_file.write_text('{"ts_ms": 1731470000000, "symbol": "BTCUSDT", "confirm": true, "score": 2.0}\n')
+
+        # 创建子目录signals文件
+        btc_dir = signals_dir / "BTCUSDT"
+        btc_dir.mkdir(exist_ok=True)
+        sub_dir_file = btc_dir / "signals-20241113-10.jsonl"
+        sub_dir_file.write_text('{"ts_ms": 1731470060000, "symbol": "BTCUSDT", "confirm": true, "score": 1.5}\n')
+
+        # 验证能读取所有文件
+        signals = list(read_signals_from_jsonl(signals_dir))
+        assert len(signals) >= 2  # 至少读取到2个信号
+
+        symbols = [s.get("symbol") for s in signals]
+        assert all(symbol == "BTCUSDT" for symbol in symbols)
