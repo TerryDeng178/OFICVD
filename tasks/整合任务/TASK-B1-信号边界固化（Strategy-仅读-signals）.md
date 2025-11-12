@@ -100,14 +100,14 @@ markdown
 - 文档：读取契约（JSONL/SQLite）、故障处理与回滚指南
 
 ## Definition of Done（DoD）
-- [ ] **零 features 访问**：CI/本地运行均无 features 读取（若发生立即 fail）。  
-- [ ] **稳定运行 ≥ 60 分钟**：Strategy 仅读 signals 情况下稳定消费（JSONL 或 SQLite 任一模式）。  
-- [ ] **健康探针生效**：  
-      - JSONL 停更 60s 内报警（目录新鲜度/心跳日志）【:contentReference[oaicite:34]{index=34}】  
-      - SQLite `dropped>0` 触发报警【:contentReference[oaicite:35]{index=35}】  
-- [ ] **目录/表契约对齐**：路径/表结构与现实现一致（含索引）【:contentReference[oaicite:36]{index=36}】【:contentReference[oaicite:37]{index=37}】  
-- [ ] **参数对齐**：`signal.sink/output_dir` ↔ `V13_SINK/V13_OUTPUT_DIR`；回放模式说明补齐【:contentReference[oaicite:38]{index=38}】【:contentReference[oaicite:39]{index=39}】【:contentReference[oaicite:40]{index=40}】  
-- [ ] **一致性用例通过**：弱信号节流/低一致性/分场景阈值行为与 CORE_ALGO 统计一致【:contentReference[oaicite:41]{index=41}】【:contentReference[oaicite:42]{index=42}】
+- [x] **零 features 访问**：CI/本地运行均无 features 读取（若发生立即 fail）。
+- [x] **稳定运行 ≥ 60 分钟**：Strategy 仅读 signals 情况下稳定消费（JSONL 或 SQLite 任一模式）。
+- [x] **健康探针生效**：
+      - JSONL 停更 60s 内报警（目录新鲜度/心跳日志）
+      - SQLite `dropped>0` 触发报警
+- [x] **目录/表契约对齐**：路径/表结构与现实现一致（含索引）
+- [x] **参数对齐**：`signal.sink/output_dir` ↔ `V13_SINK/V13_OUTPUT_DIR`；回放模式说明补齐
+- [x] **一致性用例通过**：弱信号节流/低一致性/分场景阈值行为与 CORE_ALGO 统计一致
 
 ## 实施完成记录
 
@@ -121,11 +121,23 @@ markdown
 - [OK] 架构图更新：Strategy 模块标注边界约束
 
 **测试覆盖**:
-- 误触 features 读取检测（fail-fast）
-- 信号停更 60s 报警验证
-- 心跳日志输出验证
-- 信号目录契约合规性
-- SQLite 健康指标测试
+- ✅ 误触 features 读取检测（fail-fast）
+- ✅ 信号停更 60s 报警验证
+- ✅ 心跳日志输出验证
+- ✅ 信号目录契约合规性
+- ✅ SQLite 健康指标测试
+
+**最新测试结果** (2025-11-13):
+```bash
+$ pytest tests/test_task_b1_signals_boundary.py -v
+======================== 6 passed, 1 skipped in 1.07s ========================
+
+$ pytest tests/test_equivalence.py -q
+....                                                                     [100%]
+
+TASK-B1 E2E冒烟测试:
+[TASK-B1] OK: 信号边界验证通过：Strategy仅读signals
+```
 
 **验证方式**:
 ```bash
