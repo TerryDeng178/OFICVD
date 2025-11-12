@@ -35,11 +35,12 @@ class _FeaturesImportGuard:
     """TASK-B1: Import层硬闸 - 拦截features包导入"""
 
     def __init__(self):
-        self.blocked_patterns = ['features', 'features.']
+        # 仅屏蔽顶级包 `features` 或其子模块 `features.*`
+        self.blocked_patterns = ['features.']
 
     def find_spec(self, fullname, path, target=None):
         """拦截模块导入"""
-        if any(fullname.startswith(pattern) for pattern in self.blocked_patterns):
+        if fullname == 'features' or any(fullname.startswith(pattern) for pattern in self.blocked_patterns):
             logger.error(f"[TASK-B1] BLOCKED_IMPORT: 禁止导入features相关模块: {fullname}")
             raise ImportError(f"[TASK-B1] TASK_B1_BOUNDARY_VIOLATION: Strategy层禁止访问features: {fullname}")
         return None
@@ -52,8 +53,9 @@ class _PathAccessGuard:
 
     def _check_path_blocked(self, path_str: str) -> bool:
         """检查路径是否被阻塞"""
-        path_lower = path_str.lower()
-        return any(pattern in path_lower for pattern in self.blocked_patterns)
+        from pathlib import PurePath
+        parts = [p.lower() for p in PurePath(str(path_str)).parts]
+        return 'features' in parts
 
     def patched_open(self, original_open):
         """包装open函数"""
@@ -175,21 +177,26 @@ def read_signals_from_jsonl(signals_dir: Path, symbols: Optional[list] = None, p
 
     for jsonl_file in top_level_files:
         file_key = str(jsonl_file)
+        # 如果文件已完全处理过，跳过（避免无效打开）
+        if processed_files and file_key in processed_files:
+            continue
         try:
             with jsonl_file.open("r", encoding="utf-8") as f:
-                # 如果是增量读取，跳转到上次位置
                 if file_key in last_positions:
                     f.seek(last_positions[file_key])
 
-                # 读取新内容
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
                     signal = json.loads(line)
+                    # 顶层同样支持 symbols 过滤（如传入）
+                    if symbols and signal.get("symbol", "").upper() not in [s.upper() for s in symbols]:
+                        continue
                     yield signal
 
-                # 更新最后位置
+                # 读取到文件末尾，更新位置指针与处理标记
+                last_positions[file_key] = f.tell()
                 if processed_files is not None:
                     processed_files.add(file_key)
 
@@ -214,6 +221,9 @@ def read_signals_from_jsonl(signals_dir: Path, symbols: Optional[list] = None, p
         jsonl_files = jsonl_files_v2 + jsonl_files_v1
         for jsonl_file in jsonl_files:
             file_key = str(jsonl_file)
+            # 如果文件已完全处理过，跳过（避免无效打开）
+            if processed_files and file_key in processed_files:
+                continue
             try:
                 with jsonl_file.open("r", encoding="utf-8") as f:
                     # 如果是增量读取，跳转到上次位置
@@ -733,11 +743,15 @@ def main():
                 # TASK-B1: 每分钟输出心跳日志，用于健康检查
                 current_time = time.time()
                 if current_time - last_heartbeat >= 60:  # 每60秒输出一次心跳
-                    logger.info("[TASK-B1] HEARTBEAT: Strategy Server heartbeat - signals processed: "
-                               f"total={cumulative_stats['total_signals']}, "
-                               f"confirmed={cumulative_stats['confirmed_signals']}, "
-                               f"gated={cumulative_stats['gated_signals']}, "
-                               f"orders={cumulative_stats['orders_submitted']}")
+                    hb = {
+                        "kind": "strategy_heartbeat",
+                        "ts": int(current_time * 1000),
+                        "total": cumulative_stats["total_signals"],
+                        "confirmed": cumulative_stats["confirmed_signals"],
+                        "gated": cumulative_stats["gated_signals"],
+                        "orders": cumulative_stats["orders_submitted"]
+                    }
+                    logger.info(json.dumps(hb, ensure_ascii=False))
                     last_heartbeat = current_time
 
                 # 读取新信号
