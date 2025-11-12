@@ -135,6 +135,9 @@ class Supervisor:
             "max_open_files": 0,
             "samples": []  # 定期采样记录
         }
+
+        # Patch D: 初始化runtime_state供心跳写入
+        self.runtime_state = {}
         
         # 确保目录存在
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -371,11 +374,10 @@ class Supervisor:
                         break
 
                 if latest_heartbeat:
-                    # 更新runtime_state
-                    if "strategy_heartbeat_at" not in self.runtime_state:
-                        self.runtime_state["strategy_heartbeat_at"] = {}
-                    self.runtime_state["strategy_heartbeat_at"]["timestamp"] = latest_heartbeat
-                    self.runtime_state["strategy_heartbeat_at"]["last_update"] = time.time()
+                    # Patch D: 安全写入runtime_state
+                    slot = self.runtime_state.setdefault("strategy_heartbeat_at", {})
+                    slot["timestamp"] = latest_heartbeat
+                    slot["last_update"] = time.time()
 
             except Exception as e:
                 logger.debug(f"解析Strategy心跳日志失败: {e}")
@@ -2189,6 +2191,7 @@ def build_process_specs(
     config_path: Path,
     sink_kind: str,
     output_dir: Path,
+    log_dir: Path,
     symbols: Optional[List[str]] = None
 ) -> List[ProcessSpec]:
     """构建进程规格列表"""
@@ -2205,9 +2208,15 @@ def build_process_specs(
     
     specs = []
 
+    # Patch A: 计算 logs 相对路径，供 report_server 使用
+    try:
+        log_dir_rel = log_dir.relative_to(project_root) if log_dir.is_absolute() else log_dir
+    except ValueError:
+        log_dir_rel = Path("logs")
+
     # TASK-B1 P0: Harvest健康探针动态路径选择
     # 根据 input_mode 动态计算正确的路径，避免写死在raw
-    input_mode = os.getenv("V13_INPUT_MODE", "raw")
+    input_mode = os.getenv("V13_INPUT_MODE", "preview")
     from alpha_core.common.paths import get_data_root
     harvest_data_root = get_data_root(input_mode)
     harvest_pattern = str(harvest_data_root / "**" / "*.parquet")
@@ -2323,10 +2332,10 @@ def build_process_specs(
     elif sink_kind == "jsonl":
         signal_ready_args = {"pattern": str(output_dir_rel / "ready" / "signal" / "**" / "*.jsonl")}
     else:
-        # TASK-B1 P1: 优先尝试v2数据库
-        v2_db_path = output_dir_rel / "signals_v2.db"
-        v1_db_path = output_dir_rel / "signals.db"
-        signal_ready_args = {"db_path": str(v2_db_path) if (output_dir / "signals_v2.db").exists() else str(v1_db_path)}
+        # TASK-B1 P1: 优先尝试v2数据库 (Patch C: 统一v2→v1选择)
+        v2_exists = (output_dir / "signals_v2.db").exists()
+        db_rel = output_dir_rel / ("signals_v2.db" if v2_exists else "signals.db")
+        signal_ready_args = {"db_path": str(db_rel)}
     
     # P0: 健康/就绪探针基线分环境配置
     # 实时场景：保持现有时间窗口检查
@@ -2352,8 +2361,11 @@ def build_process_specs(
             "max_idle_seconds": 60 if not is_replay_mode else None  # P0: 回放场景不检查最大空闲时间
         }
     else:
+        # Patch C: 健康探针与就绪探针一致采用v2→v1选择
+        v2_exists = (output_dir / "signals_v2.db").exists()
+        db_rel = output_dir_rel / ("signals_v2.db" if v2_exists else "signals.db")
         signal_health_args = {
-            "db_path": str(output_dir_rel / "signals.db"),
+            "db_path": str(db_rel),
             # 修复：SQLite 健康探针在回放场景放宽或禁用增长校验
             "min_growth_window_seconds": None if is_replay_mode else 120,  # 回放场景禁用增长校验
             "min_growth_count": 0 if is_replay_mode else 1  # 回放场景不要求增长
@@ -2524,6 +2536,7 @@ async def main_async(args):
         config_path=config_path,
         sink_kind=sink_kind,
         output_dir=output_dir,
+        log_dir=log_dir,
         symbols=args.symbols.split(",") if args.symbols else None
     )
     
@@ -2802,7 +2815,9 @@ async def main_async(args):
                     "config_sha1": config_sha1,  # P1: 配置文件内容 hash
                     "features_manifest": features_manifest,  # P1: 输入目录/文件指纹摘要
                     "env_overrides": env_overrides,  # P1: 关键 env 的最终值
-                    "sink_used": sink_used  # P1: 实际使用的sink类名（从signal日志中提取）
+                    "sink_used": sink_used,  # P1: 实际使用的sink类名（从signal日志中提取）
+                    "input_mode_resolved": input_mode,  # P1: 路径自检与健康探针口径对齐 - 最终解析的输入模式
+                    "input_dir_resolved": str(features_dir)  # P1: 最终解析的输入目录路径
                 }
             }
             manifest_path = artifacts_dir / "run_logs" / f"run_manifest_{manifest['run_id']}.json"
