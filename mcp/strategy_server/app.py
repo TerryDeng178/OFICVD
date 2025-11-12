@@ -52,16 +52,16 @@ def _validate_signals_only_boundary() -> None:
                     'features/', 'features\\', '/features', '\\features',
                     'from features', 'import features'
                 ]):
-                    logger.error(f"[TASK-B1] ❌ 检测到禁止的features访问: {line.strip()}")
-                    logger.error(f"[TASK-B1] ❌ 文件: {frame_info.filename}:{frame_info.lineno}")
-                    logger.error("[TASK-B1] ❌ Strategy层必须只读signals，禁止访问features")
+                    logger.error(f"[TASK-B1] ERROR: 检测到禁止的features访问: {line.strip()}")
+                    logger.error(f"[TASK-B1] ERROR: 文件: {frame_info.filename}:{frame_info.lineno}")
+                    logger.error("[TASK-B1] ERROR: Strategy层必须只读signals，禁止访问features")
                     sys.exit(1)
 
             current_frame = current_frame.f_back
     finally:
         del current_frame
 
-    logger.info("[TASK-B1] ✅ 信号边界验证通过：Strategy仅读signals")
+    logger.info("[TASK-B1] OK: 信号边界验证通过：Strategy仅读signals")
 
 
 def load_config(config_path: Optional[str]) -> Dict:
@@ -519,7 +519,7 @@ def main():
     cfg = load_config(args.config)
 
     # TASK-B1: 信号边界固化 - 验证Strategy仅读signals
-    logger.info("[TASK-B1] 🔍 执行信号边界验证...")
+    logger.info("[TASK-B1] CHECK: 执行信号边界验证...")
     _validate_signals_only_boundary()
 
     # 确定执行模式
@@ -633,7 +633,7 @@ def main():
                 # TASK-B1: 每分钟输出心跳日志，用于健康检查
                 current_time = time.time()
                 if current_time - last_heartbeat >= 60:  # 每60秒输出一次心跳
-                    logger.info("[TASK-B1] 💓 Strategy Server heartbeat - signals processed: "
+                    logger.info("[TASK-B1] HEARTBEAT: Strategy Server heartbeat - signals processed: "
                                f"total={cumulative_stats['total_signals']}, "
                                f"confirmed={cumulative_stats['confirmed_signals']}, "
                                f"gated={cumulative_stats['gated_signals']}, "

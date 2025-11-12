@@ -74,7 +74,7 @@ repo/
 │  ├─ harvest_server/app.py               # ★ HARVEST：采集/对齐/落盘（Raw+Preview/宽表）
 │  ├─ signal_server/app.py                # ★ SIGNAL：信号生成（CoreAlgo薄壳）
 │  ├─ strategy_server/                    # ★ STRATEGY：策略执行（含风控模块）
-│  │  ├─ app.py                           # ⚠️ TASK-B1：**仅读 signals**，禁止访问 features/
+│  │  ├─ app.py                           # WARNING: TASK-B1：**仅读 signals**，禁止访问 features/
 │  │  │                                      #   边界约束：启动时验证，无features访问；心跳日志健康检查
 │  │  └─ risk/                            # 风控模块（合并ofi_risk_server逻辑）
 │  ├─ broker_gateway_server/app.py        # ★ BROKER：交易所网关（Testnet/Live）

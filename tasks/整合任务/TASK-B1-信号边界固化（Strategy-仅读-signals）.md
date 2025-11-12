@@ -114,11 +114,11 @@ markdown
 **完成时间**: 2025-11-13
 
 **交付物**:
-- ✅ `mcp/strategy_server/app.py`: fail-fast 断言 + 心跳日志输出
-- ✅ `orchestrator/run.py`: signals 健康探针（JSONL新鲜度/SQLite增长）
-- ✅ `tests/test_task_b1_signals_boundary.py`: CI/E2E 测试用例
-- ✅ `README.md`: 边界声明与回滚指引
-- ✅ 架构图更新：Strategy 模块标注边界约束
+- [OK] `mcp/strategy_server/app.py`: fail-fast 断言 + 心跳日志输出
+- [OK] `orchestrator/run.py`: signals 健康探针（JSONL新鲜度/SQLite增长）
+- [OK] `tests/test_task_b1_signals_boundary.py`: CI/E2E 测试用例
+- [OK] `README.md`: 边界声明与回滚指引
+- [OK] 架构图更新：Strategy 模块标注边界约束
 
 **测试覆盖**:
 - 误触 features 读取检测（fail-fast）
@@ -141,8 +141,8 @@ pytest tests/test_task_b1_signals_boundary.py::TestTaskB1SignalsBoundary::test_s
 
 **运行日志样例**:
 ```
-[TASK-B1] 💓 Strategy Server heartbeat - signals processed: total=150, confirmed=45, gated=40, orders=35
-[TASK-B1] ✅ 信号边界验证通过：Strategy仅读signals
+[TASK-B1] HEARTBEAT: Strategy Server heartbeat - signals processed: total=150, confirmed=45, gated=40, orders=35
+[TASK-B1] OK: 信号边界验证通过：Strategy仅读signals
 ```
 
 **修复记录**:

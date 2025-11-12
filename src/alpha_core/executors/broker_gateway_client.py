@@ -73,7 +73,7 @@ class BrokerGatewayClient:
                     testnet=self.testnet
                 )
                 if not self.testnet:
-                    logger.warning("[BrokerGatewayClient] ⚠️  LIVE TRADING MODE - Real money at risk!")
+                    logger.warning("[BrokerGatewayClient] WARNING: LIVE TRADING MODE - Real money at risk!")
                     logger.warning("[BrokerGatewayClient] Please ensure mock_enabled=false is intentional.")
                 logger.info("[BrokerGatewayClient] Binance API client initialized")
             else:

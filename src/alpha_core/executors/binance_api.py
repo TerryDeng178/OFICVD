@@ -79,7 +79,7 @@ class BinanceFuturesAPI:
             logger.info(f"[BinanceAPI] Using custom implementation: testnet={testnet}, base_url={self.base_url}")
         
         if not testnet:
-            logger.warning("[BinanceAPI] ⚠️  LIVE TRADING MODE - Real money at risk!")
+            logger.warning("[BinanceAPI] WARNING: LIVE TRADING MODE - Real money at risk!")
             logger.warning("[BinanceAPI] Please ensure you have proper risk controls in place.")
     
     def _generate_signature(self, params: Dict) -> str:

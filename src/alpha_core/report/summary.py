@@ -587,7 +587,7 @@ class ReportGenerator:
         unknown_count = by_scenario.get("unknown", {}).get("count", 0)
         unknown_ratio = unknown_count / total_trades if total_trades > 0 else 0
         if unknown_ratio > 0:
-            md.append(f"⚠️ **数据质量提示**: unknown场景占比 {unknown_ratio*100:.2f}% ({unknown_count}/{total_trades})")
+            md.append(f"WARNING: **数据质量提示**: unknown场景占比 {unknown_ratio*100:.2f}% ({unknown_count}/{total_trades})")
             md.append("")
         
         md.append("| 场景 | 交易数 | 净PnL | 费用 | 滑点 | 胜率 | 盈亏比 |")

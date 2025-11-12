@@ -42,7 +42,7 @@ def make_adapter(config: Dict[str, Any]) -> BaseAdapter:
         # P2: 一致性校验 + 强校验
         if adapter_impl != executor_mode:
             logger.warning(
-                f"[AdapterIntegration] ⚠️  adapter.impl ({adapter_impl}) != executor.mode ({executor_mode}), "
+                f"[AdapterIntegration] WARNING: adapter.impl ({adapter_impl}) != executor.mode ({executor_mode}), "
                 f"using adapter.impl={adapter_impl}"
             )
             # P2: 落地 adapter_event 记录配置不一致

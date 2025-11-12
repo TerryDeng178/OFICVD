@@ -671,10 +671,10 @@ class RealCVDCalculator:
             if self._last_price is not None:
                 if price > self._last_price:
                     side = True  # 买入
-                    self._tick_rule_count = 0   # ✅ 价格变动时重置
+                    self._tick_rule_count = 0   # OK: 价格变动时重置
                 elif price < self._last_price:
                     side = False  # 卖出
-                    self._tick_rule_count = 0   # ✅
+                    self._tick_rule_count = 0   # OK
                 else:  # price == last_price，限制tick-rule回退传播
                     # 检查是否超过传播限制
                     if hasattr(self, '_tick_rule_count'):

@@ -25,7 +25,7 @@ class TestTaskB1SignalsBoundary:
             _validate_signals_only_boundary()
 
         # 应该记录成功日志
-        assert any("[TASK-B1] ✅ 信号边界验证通过" in record.message
+        assert any("[TASK-B1] OK: 信号边界验证通过" in record.message
                   for record in caplog.records)
 
     @patch('sys.exit')
@@ -52,7 +52,7 @@ class TestTaskB1SignalsBoundary:
                 _validate_signals_only_boundary()
 
             # 应该记录错误并退出
-            assert any("[TASK-B1] ❌ 检测到禁止的features访问" in record.message
+            assert any("[TASK-B1] ERROR: 检测到禁止的features访问" in record.message
                       for record in caplog.records)
             assert any("Strategy层必须只读signals，禁止访问features" in record.message
                       for record in caplog.records)
@@ -80,7 +80,7 @@ class TestTaskB1SignalsBoundary:
             _validate_signals_only_boundary()
 
             # 应该记录错误并退出
-            assert any("[TASK-B1] ❌ 检测到禁止的features访问" in record.message
+            assert any("[TASK-B1] ERROR: 检测到禁止的features访问" in record.message
                       for record in caplog.records)
             mock_exit.assert_called_once_with(1)
 
