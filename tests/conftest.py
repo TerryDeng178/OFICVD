@@ -8,13 +8,18 @@ import sys
 import pytest
 from pathlib import Path
 
-# 添加 src 目录到 Python 路径
+# 添加项目根目录和 src 目录到 Python 路径
 # 测试文件位于: tests/test_*.py
-# 项目结构: tests/ -> project_root/ -> src/
+# 项目结构: tests/ -> project_root/ -> src/ 和 mcp/
 _TEST_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _TEST_DIR.parent
 _SRC_DIR = _PROJECT_ROOT / "src"
 
+# 添加项目根目录（用于导入 mcp 模块）
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+# 添加 src 目录（用于导入 alpha_core 模块）
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 

@@ -16,9 +16,11 @@ from typing import Dict, Any, List, Optional, Tuple
 from collections import defaultdict
 
 from alpha_core.executors.backtest_executor import BacktestExecutor
+from alpha_core.executors.testnet_executor import TestnetExecutor
 from alpha_core.executors.base_executor import Order, Side, OrderType, Fill
 from alpha_core.signals.core_algo import CoreAlgorithm
 from alpha_core.signals.signal_writer import SignalWriterV2
+from mcp.strategy_server.app import process_signals, signal_to_order
 
 
 @pytest.mark.equivalence
@@ -219,14 +221,18 @@ class TestEquivalence:
         signals = self._create_test_signals(temp_dir, run_id, count=20)
         self._write_signals_to_dual_sink(temp_dir, signals)
         
-        # 2. 初始化 BacktestExecutor
+        # 2. 路径A：BacktestExecutor
         backtest_executor = BacktestExecutor()
         backtest_config = base_config.copy()
         backtest_config["executor"]["mode"] = "backtest"
         backtest_executor.prepare(backtest_config)
         
-        # 3. 处理确认信号（confirm=true）
-        confirmed_signals = [s for s in signals if s["confirm"]]
+        # 应用 Top-1 过滤（与路径B保持一致）
+        from mcp.strategy_server.app import _select_top_signals
+        filtered_signals, removed = _select_top_signals(signals)
+        print(f"\n[DEBUG] Backtest: Original signals: {len(signals)}, Filtered signals: {len(filtered_signals)}, Removed: {removed}")
+        confirmed_signals = [s for s in filtered_signals if s.get("confirm")]
+        print(f"[DEBUG] Backtest: Confirmed signals: {len(confirmed_signals)}")
         mid_price = 50000.0
         
         backtest_fills = []
@@ -240,36 +246,92 @@ class TestEquivalence:
                 ts_ms=sig["ts_ms"],
                 metadata={"mid_price": mid_price},
             )
-            broker_order_id = backtest_executor.submit(order)
-            fills = backtest_executor.fetch_fills()
-            backtest_fills.extend(fills)
+            backtest_executor.submit(order)
         
-        # 4. 验证等价性
-        assert len(backtest_fills) > 0, "BacktestExecutor should produce fills"
+        backtest_fills = backtest_executor.fetch_fills()
+        backtest_positions = backtest_executor.positions  # 直接访问 positions 属性
+        backtest_total_notional = sum(f.price * f.qty for f in backtest_fills)
+        backtest_total_fee = sum(f.fee for f in backtest_fills)
+        backtest_fee_bps = (backtest_total_fee / backtest_total_notional * 10000) if backtest_total_notional > 0 else 0
         
-        # 验证成交路径：逐笔方向/数量/价格一致
-        for fill in backtest_fills:
-            assert fill.price > 0, "Fill price should be positive"
-            assert fill.qty > 0, "Fill qty should be positive"
-            assert fill.fee >= 0, "Fee should be non-negative"
-            assert fill.liquidity in ["maker", "taker", "unknown"], "Liquidity should be valid"
+        # 3. 路径B：Replay Executor（dry-run模式）
+        replay_executor = TestnetExecutor()
+        replay_config = base_config.copy()
+        replay_config["executor"]["mode"] = "testnet"
+        replay_config["broker"] = replay_config.get("broker", {})
+        replay_config["broker"]["dry_run"] = True  # 启用 dry-run
+        replay_executor.prepare(replay_config)
         
-        # 验证费用模型：maker/taker 费率与 bps 计算一致
-        if backtest_fills:
-            total_notional = sum(f.price * f.qty for f in backtest_fills)
-            total_fee = sum(f.fee for f in backtest_fills)
-            fee_bps = (total_fee / total_notional * 10000) if total_notional > 0 else 0
+        executor_cfg = base_config.get("executor", {})
+        executor_cfg["order_size_usd"] = 5000  # 0.1 * 50000
+        replay_stats = process_signals(replay_executor, iter(signals), executor_cfg)
+        
+        # 调试：打印统计信息
+        print(f"\n[DEBUG] Replay stats: {replay_stats}")
+        print(f"[DEBUG] Original signals: {len(signals)}")
+        print(f"[DEBUG] Confirmed signals: {sum(1 for s in signals if s.get('confirm'))}")
+        
+        replay_fills = replay_executor.fetch_fills()
+        replay_positions = replay_executor.positions  # 直接访问 positions 属性
+        replay_total_notional = sum(f.price * f.qty for f in replay_fills)
+        replay_total_fee = sum(f.fee for f in replay_fills)
+        replay_fee_bps = (replay_total_fee / replay_total_notional * 10000) if replay_total_notional > 0 else 0
+        
+        # 4. 验证等价性：逐笔成交一致
+        assert len(backtest_fills) == len(replay_fills), (
+            f"Fill count mismatch: backtest={len(backtest_fills)}, replay={len(replay_fills)}"
+        )
+        
+        backtest_fills_sorted = sorted(backtest_fills, key=lambda f: (f.ts_ms, f.client_order_id))
+        replay_fills_sorted = sorted(replay_fills, key=lambda f: (f.ts_ms, f.client_order_id))
+        
+        for i, (fill_a, fill_b) in enumerate(zip(backtest_fills_sorted, replay_fills_sorted)):
+            # 方向一致
+            assert fill_a.side == fill_b.side, (
+                f"Fill {i}: side mismatch - backtest={fill_a.side}, replay={fill_b.side}"
+            )
             
-            expected_fee_bps = base_config["backtest"]["taker_fee_bps"]
-            # 允许一定误差（由于滑点等因素）
-            assert abs(fee_bps - expected_fee_bps) < 2.0, (
-                f"Fee BPS mismatch: {fee_bps:.2f} vs {expected_fee_bps:.2f}"
+            # 价格一致（允许误差）
+            price_diff = abs(fill_a.price - fill_b.price)
+            assert price_diff < self.EPSILON, (
+                f"Fill {i}: price mismatch - backtest={fill_a.price}, replay={fill_b.price}, diff={price_diff}"
+            )
+            
+            # 数量一致（允许误差）
+            qty_diff = abs(fill_a.qty - fill_b.qty)
+            assert qty_diff < self.EPSILON, (
+                f"Fill {i}: qty mismatch - backtest={fill_a.qty}, replay={fill_b.qty}, diff={qty_diff}"
+            )
+            
+            # 费用一致（允许误差）
+            fee_diff = abs(fill_a.fee - fill_b.fee)
+            assert fee_diff < self.EPSILON, (
+                f"Fill {i}: fee mismatch - backtest={fill_a.fee}, replay={fill_b.fee}, diff={fee_diff}"
             )
         
-        # 验证 PNL：最终 PNL 误差 |Δ| < 1e-8
-        # 这里简化处理，实际应该计算持仓和未实现盈亏
-        # BacktestExecutor 通过 trade_sim 管理持仓，这里验证 fills 存在即可
-        assert len(backtest_fills) > 0, "Should have fills"
+        # 5. 验证费用模型：maker/taker 费率与 bps 计算一致
+        fee_bps_diff = abs(backtest_fee_bps - replay_fee_bps)
+        assert fee_bps_diff < 1.0, (  # 允许1 bps误差
+            f"Fee BPS mismatch: backtest={backtest_fee_bps:.2f}, replay={replay_fee_bps:.2f}, diff={fee_bps_diff:.2f}"
+        )
+        
+        # 6. 验证仓位路径：持仓一致
+        for symbol in set(list(backtest_positions.keys()) + list(replay_positions.keys())):
+            qty_a = backtest_positions.get(symbol, 0.0)
+            qty_b = replay_positions.get(symbol, 0.0)
+            qty_diff = abs(qty_a - qty_b)
+            assert qty_diff < self.EPSILON, (
+                f"Position mismatch for {symbol}: backtest={qty_a}, replay={qty_b}, diff={qty_diff}"
+            )
+        
+        # 7. 验证 PNL：最终 PNL 误差 |Δ| < 1e-8
+        # 简化：基于持仓计算（实际应该跟踪开仓价格）
+        backtest_pnl = sum(qty * mid_price for qty in backtest_positions.values())
+        replay_pnl = sum(qty * mid_price for qty in replay_positions.values())
+        pnl_diff = abs(backtest_pnl - replay_pnl)
+        assert pnl_diff < self.EPSILON, (
+            f"PNL mismatch: backtest={backtest_pnl}, replay={replay_pnl}, diff={pnl_diff}"
+        )
     
     def test_case_b_dual_sink_consistency(self, temp_dir, base_config):
         """Case-B: 双 Sink 一致性

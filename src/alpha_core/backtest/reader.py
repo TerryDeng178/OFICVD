@@ -78,6 +78,8 @@ class DataReader:
         self._current_file_path: Optional[Path] = None  # 跟踪当前处理的文件
         # P1-5: 记录实际命中样例文件路径（用于CI目录结构回归）
         self._sample_files = set()
+        # P1-4: 记录结构类型（flat/partition/preview_partition）
+        self._structure_type: Optional[str] = None
     
     def read_features(self) -> Iterator[Dict[str, Any]]:
         """Read features data (fast path)"""
@@ -154,6 +156,9 @@ class DataReader:
             for base_dir in [self.input_dir, self.input_dir / "raw"]:
                 date_partition = base_dir / f"date={self.date}"
                 if date_partition.exists():
+                    # P1-4: 记录结构类型为partition
+                    if self._structure_type is None:
+                        self._structure_type = "partition"
                     # Check all hour directories
                     for hour_dir in date_partition.iterdir():
                         if hour_dir.is_dir() and hour_dir.name.startswith("hour="):
@@ -171,6 +176,9 @@ class DataReader:
             # Flat structure: data/ofi_cvd/ready/{kind}/{symbol}/...
             ready_dir = self.input_dir / "ready" / kind
             if ready_dir.exists():
+                # P1-4: 记录结构类型为flat
+                if self._structure_type is None:
+                    self._structure_type = "flat"
                 for symbol_dir in ready_dir.iterdir():
                     if symbol_dir.is_dir():
                         symbol = symbol_dir.name.upper()
@@ -187,6 +195,9 @@ class DataReader:
             # Check preview/ready/{kind}/{symbol}/...
             preview_ready_dir = self.input_dir / "preview" / "ready" / kind
             if preview_ready_dir.exists():
+                # P1-4: 记录结构类型为preview_partition（preview下的flat结构）
+                if self._structure_type is None:
+                    self._structure_type = "preview_partition"
                 for symbol_dir in preview_ready_dir.iterdir():
                     if symbol_dir.is_dir():
                         symbol = symbol_dir.name.upper()
@@ -200,6 +211,9 @@ class DataReader:
             if self.date:
                 preview_date_partition = self.input_dir / "preview" / f"date={self.date}"
                 if preview_date_partition.exists():
+                    # P1-4: 记录结构类型为preview_partition
+                    if self._structure_type is None:
+                        self._structure_type = "preview_partition"
                     for hour_dir in preview_date_partition.iterdir():
                         if hour_dir.is_dir() and hour_dir.name.startswith("hour="):
                             for symbol_dir in hour_dir.iterdir():
@@ -398,5 +412,6 @@ class DataReader:
             "partition_count": self.stats.get("partition_count", 0),
             "file_count": self.stats.get("file_count", 0),
             "sample_files": sample_files,  # P1-5: 实际命中样例文件路径
+            "structure_type": self._structure_type,  # P1-4: 记录结构类型（flat/partition/preview_partition）
         }
 

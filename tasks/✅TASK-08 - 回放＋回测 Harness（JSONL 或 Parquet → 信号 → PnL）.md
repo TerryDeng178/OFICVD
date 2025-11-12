@@ -269,6 +269,15 @@ backtest:
 * [x] **P0修复验证**：8项P0修复全部完成并通过测试，回归测试6/6通过，冒烟测试4/4通过。
 * [x] **P1改进验证**：8项P1改进全部完成并通过测试，PnL切日边界测试7/7通过，property-based测试用例完成。
 * [x] **P2改进验证**：3项P2改进全部完成并通过测试，turnover细化、heatmap生成、配置验证功能正常。
+* [x] **v4.0.7 P1改进验证**：4项P1改进全部完成并通过测试，时区一致性测试通过，边界对齐回归测试通过。
+* [x] **v4.0.7 代码层改进验证**：6项代码层改进全部完成并通过测试，测试通过率100%，linter检查无错误。
+* [x] **v4.0.8 P0修复验证**：3项P0修复全部完成并通过测试，代码检查3/3通过，回测验证通过。
+* [x] **v4.0.8 P1改进验证**：5项P1改进全部完成并通过测试，代码检查5/5通过，PnL切日用例pytest测试通过。
+* [x] **v4.0.8 P2改进验证**：2项P2改进全部完成并通过测试（P2-2待需求确认），代码检查2/2通过。
+* [x] **v4.0.9 P0修复验证**：9项P0/P1修复全部完成并通过测试，代码检查9/9通过，回测验证通过。
+* [x] **v4.0.9 P1改进验证**：11项P0/P1改进全部完成并通过测试，代码检查11/11通过，回测验证通过。
+* [x] **v4.0.10 P0修复验证**：5项P0修复全部完成并通过测试，代码检查6/6通过（包含P1-1）。
+* [x] **v4.0.10 P1改进验证**：5项P1改进全部完成并通过测试，PnL切日回归测试扩展4个用例，代码检查全部通过。
 
 ---
 
@@ -372,4 +381,88 @@ runtime/
   * P2.1: Turnover口径细化（maker/taker分项 + 费率等级分布）
   * P2.2: Aligner对齐完整度heatmap（每分钟0-60s命中率，CSV/JSON输出）
   * P2.3: 配置契约Pydantic Schema（默认值/枚举校验 + 环境变量映射）
+* P1改进（v4.0.7）：
+  * P1.1: Gate统计双跑基线（加到CI，scripts/extract_gate_stats_from_signals.py，支持按场景/模式分桶对比）
+  * P1.2: PnL切日与时区回归测试（添加test_cross_timezone_consistency测试，创建pnl-rollover-tz.yml CI工作流）
+  * P1.3: 滑点/费用情境化落地（MVP，slippage_piecewise和fee_tiered配置，scenario_2x2→滑点bps曲线，fee_tier→费率表）
+  * P1.4: 边界对齐回归（扩充分层用例，tests/test_alignment_boundary_extended.py，符号×数据源×时间窗参数化测试）
+* 代码层改进（v4.0.7）：
+  * 代码.1: Metrics推送规范化（Pushgateway时间戳从毫秒改为秒，添加instance标签：主机名+环境变量）
+  * 代码.2: Sharpe/Sortino收益率归一（添加initial_equity参数，将PnL序列转换为日收益率序列）
+  * 代码.3: Reader去重集内存优化（按分钟桶维护_seen_keys_buckets，处理完每个文件后清理过期桶，保留最近2小时）
+  * 代码.4: Aligner门限外置到配置（lag_threshold_ms/spread_threshold/volatility_threshold移到配置，支持默认值与环境变量覆盖）
+  * 代码.5: TradeSim收盘清仓时间戳（close_all_positions使用最后一条市场数据ts，避免切日PnL被当前机器时间影响）
+  * 代码.6: Maker/Taker费用模型（基于spread_bps/scenario_2x2决定成交落点概率，"宽&动"场景提高taker概率，使用期望费率）
+* P0修复（v4.0.8）：
+  * P0-1: Harness未把场景上下文补到signal（full path分支补充spread_bps/scenario_2x2/fee_tier/session）
+  * P0-2: 固定ready优先顺序（确保ready覆盖preview，固定source_priority=["ready", "preview"]）
+  * P0-3: Maker/Taker统计与费用模型口径一致（使用概率期望口径，而非简单的side判定）
+* P1改进（v4.0.8）：
+  * P1-1: Aligner场景判定微调（is_active用spread，is_high_vol仅用return_1s，解耦A/Q与H/L两条轴）
+  * P1-2: Reader去重桶保留时长参数化（支持config/env配置dedup_keep_hours，默认2小时）
+  * P1-3: Metrics场景分解补完（按scenario_2x2+session分组计算avg_hold_sec/win_rate/avg_pnl）
+  * P1-4: PnL切日用例入CI（跨月/跨年/周末用例并入CI matrix）
+  * P1-5: Pushgateway加Reader/Feeder健康度指标（backtest_reader_dedup_rate/backtest_reader_total_rows/backtest_sink_health/backtest_feeder_signals_emitted）
+* P2改进（v4.0.8）：
+  * P2-1: Config Schema补import json（修复__main__块中缺失的json导入）
+  * P2-3: 运行清单可复现性（run_manifest.json添加git_commit和data_fingerprint字段）
+* P0修复（v4.0.9）：
+  * P0-1: 保留YAML其它分区（load_config保留原始YAML所有顶层键，只校验backtest小节）
+  * P0-2: Pushgateway指标去重（统一在_save_metrics中推送，删除harness中的二次调用）
+  * P0-3: vol_bps实值补充（Aligner生成vol_bps = abs(return_1s)，TradeSim兜底逻辑）
+  * P0-4: Feeder字段名对齐（支持emitted和signals_emitted别名）
+  * P0-1: fast path未附加_feature_data（fast path已附加_feature_data，包含return_1s/spread_bps/scenario_2x2等字段）
+  * P0-3: ignore_gating CLI无法置为False（添加--respect-gating参数，修复优先级逻辑：CLI > YAML > 默认）
+  * P0-4: DataReader未接收config（harness中已传递config给DataReader）
+  * P0-5: 默认来源优先级修复（默认优先级改为["ready", "preview"]，ready优先）
+  
+  注：v4.0.9包含两个改进批次，共9个P0/P1修复项和11个P0/P1改进项
+* P1改进（v4.0.9）：
+  * P1-1: DataReader保留时长支持config（DataReader.__init__()添加config参数，支持dedup_keep_hours配置）
+  * P1-2: manifest时间字段语义化（started_at/finished_at，进程开始/结束时间）
+  * P1-3: Pushgateway job命名优化（使用run_id，避免重复前缀backtest_）
+  * P1-4: 统一波动字段命名（metrics中添加avg_ret1s_bps字段）
+  * P1-1: Pushgateway分组键优化（push URL包含instance路径：/metrics/job/{run_id}/instance/{instance}，避免多机/并行回测覆盖）
+  * P1-2: 统一在_feature_data中显式包含return_1s（fast path/full path/ReplayFeeder都已包含return_1s）
+  * P1-3: aligner_config变量清理（移除未使用的aligner_config变量）
+  * P1-4: 无交易时的Metrics行为优化（返回空指标结构包含所有核心字段，即使无交易也推送健康度指标）
+  * P1-5: Reader样例文件路径记录（添加_sample_files集合记录实际命中样例文件路径，get_stats()返回sample_files字段，前3个样例文件）
+* P0修复（v4.0.10）：
+  * P0-1: TradeSim Reverse分支交易重复写入修复（删除reverse分支里的第二次_record_trade()调用）
+  * P0-2: DataReader分片计数不一致修复（flat结构扫描时也累计partition_count）
+  * P0-3: DataAligner观测间隔诊断指标（新增obs_gap_ms_price_avg和obs_gap_ms_orderbook_avg）
+  * P0-4: 回测配置环境变量映射补全（TAKER_FEE_BPS/SLIPPAGE_BPS/NOTIONAL_PER_TRADE/IGNORE_GATING）
+  * P0-5: Pushgateway健康指标字段名修复（ReplayFeeder.get_stats()增加signals_emitted别名）
+* P1改进（v4.0.10）：
+  * P1-1: Pushgateway指标再补两项"质量→收益"桥接（backtest_aligner_gap_rate和backtest_lag_bad_rate）
+  * P1-2: Maker/Taker概率模型参数化（外置scenario_probs/spread_slope/side_bias等系数到YAML）
+  * P1-3: PnL切日跨DST/跨月回归测试（新增4个测试用例：秋季DST回退、NY跨DST+跨月、跨月/跨年小样本、DST+自定义rollover_hour）
+  * P1-4: Reader样例路径记录结构类型（记录flat/partition/preview_partition，用于目录结构回归断言）
+  * P1-5: 对齐指标阈值外置（在backtest.yaml中显式给出默认值和环境变量覆盖说明）
+* 测试增强（v4.0.7）：
+  * 验证脚本：新增scripts/verify_v407_improvements.py
+  * 回测验证：时区一致性测试通过，边界对齐回归测试通过
+  * CI工作流：新增.github/workflows/pnl-rollover-tz.yml和更新gate-baseline.yml
+* 文档更新（v4.0.7）：
+  * 新增报告：reports/v4.0.7-TASK-08-最终实施报告.md和reports/v4.0.7-TASK-08-测试验证报告.md
+  * 配置文档：backtest.yaml中添加slippage_piecewise和fee_tiered配置
+* 测试增强（v4.0.8）：
+  * 验证脚本：新增scripts/verify_v408_improvements.py
+  * 回测验证：manifest文件生成正常，包含git_commit和data_fingerprint字段
+  * PnL切日用例：pytest测试全部通过
+* 文档更新（v4.0.8）：
+  * 新增报告：reports/v4.0.8-TASK-08-改进实施报告.md和reports/v4.0.8-验证结果报告.md
+  * 配置文档：backtest.yaml中添加reader.dedup_keep_hours配置项
+* 测试增强（v4.0.9）：
+  * 验证脚本：新增scripts/verify_v409_fixes.py和scripts/verify_v409_improvements.py
+  * 回测验证：manifest文件生成正常，包含所有必需字段
+* 文档更新（v4.0.9）：
+  * 新增报告：reports/v4.0.9-测试验证报告.md和reports/v4.0.9-改进项验证报告.md
+  * 配置文档：load_config函数保留YAML所有顶层键
+* 测试增强（v4.0.10）：
+  * PnL切日回归测试扩展：新增4个测试用例（test_dst_fallback_america_new_york、test_dst_cross_month_ny、test_cross_month_small_sample、test_dst_with_custom_rollover_hour）
+  * 验证脚本：新增scripts/verify_v410_improvements.py和scripts/verify_v410_p1_improvements.py
+* 文档更新（v4.0.10）：
+  * 新增报告：reports/v4.0.10-完整改进与测试报告.md（P0和P1项综合报告）
+  * 配置文档：backtest.yaml中aligner和fee_maker_taker配置段完善
 * 不兼容变更：无（仅新增能力和修复，完全向后兼容）。

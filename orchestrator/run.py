@@ -506,10 +506,12 @@ class Supervisor:
                                 return False
                             
                             # 查询最近窗口内的行数（假设有 ts_ms 字段）
+                            # Strategy 健康检查：检查总信号数增长（不要求 confirm=1）
+                            # 因为 strategy 的健康应该反映"是否有新信号产生"，而不是"是否有确认信号"
                             try:
                                 cursor.execute("""
                                     SELECT COUNT(*) FROM signals 
-                                    WHERE ts_ms >= ? AND confirm = 1
+                                    WHERE ts_ms >= ?
                                 """, (window_start_ms,))
                                 recent_count = cursor.fetchone()[0]
                                 
@@ -2365,21 +2367,49 @@ def build_process_specs(
     if symbols:
         strategy_cmd.extend(["--symbols"] + symbols)
     
-    strategy_spec = ProcessSpec(
-        name="strategy",
-        cmd=strategy_cmd,
-        env=strategy_env,
-        ready_probe="log_keyword",
-        ready_probe_args={"keywords": ["Strategy Server", "Creating", "executor", "Reading signals", "started and ready"]},  # 支持多个关键词（包括 watch 模式）
-        health_probe="file_count",
-        health_probe_args={
-            "pattern": str(output_dir_rel / "ready" / "execlog" / "**" / "*.jsonl"),
-            "min_count": 0,  # 允许初始为空
-            "min_new_last_seconds": min_new_last_seconds,
-        },
-        restart_policy="on_failure",
-        max_restarts=2
-    )
+    # Strategy 健康检查：监控信号增长（而非 execlog）
+    # 优先使用 signals_v2.db（v2 格式），回退到 signals.db（v1 格式）
+    # 回放模式：使用 file_count 检查 JSONL 文件新增（因为 ts_ms 是历史时间）
+    # 实时模式：使用 sqlite_query 检查信号增长（120秒窗口，至少1条增长）
+    if is_replay_mode or sink_kind in ("jsonl", "dual"):
+        # 回放模式或 JSONL 模式：检查 JSONL 文件新增（更可靠，不依赖 ts_ms）
+        strategy_spec = ProcessSpec(
+            name="strategy",
+            cmd=strategy_cmd,
+            env=strategy_env,
+            ready_probe="log_keyword",
+            ready_probe_args={"keywords": ["Strategy Server", "Creating", "executor", "Reading signals", "started and ready"]},
+            health_probe="file_count",  # 回放/JSONL模式：检查文件新增
+            health_probe_args={
+                "pattern": str(output_dir_rel / "ready" / "signal" / "**" / "*.jsonl"),
+                "min_count": 0,  # 允许初始为空
+                "min_new_last_seconds": 0 if is_replay_mode else 120,  # 回放场景禁用时间窗口
+                "min_new_count": 0 if is_replay_mode else 1  # 回放场景不要求新增
+            },
+            restart_policy="on_failure",
+            max_restarts=2
+        )
+    else:
+        # SQLite 模式（非回放）：检查 SQLite 信号增长
+        strategy_db_path = str(output_dir_rel / "signals_v2.db")
+        if not (output_dir / "signals_v2.db").exists():
+            strategy_db_path = str(output_dir_rel / "signals.db")
+        
+        strategy_spec = ProcessSpec(
+            name="strategy",
+            cmd=strategy_cmd,
+            env=strategy_env,
+            ready_probe="log_keyword",
+            ready_probe_args={"keywords": ["Strategy Server", "Creating", "executor", "Reading signals", "started and ready"]},
+            health_probe="sqlite_query",  # SQLite模式：检查信号增长
+            health_probe_args={
+                "db_path": strategy_db_path,
+                "min_growth_window_seconds": 120,  # 实时模式：120秒窗口
+                "min_growth_count": 1  # 至少1条增长
+            },
+            restart_policy="on_failure",
+            max_restarts=2
+        )
     specs.append(strategy_spec)
     
     # Report Server (报表生成服务)

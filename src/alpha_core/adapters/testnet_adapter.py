@@ -280,6 +280,26 @@ class TestnetAdapter(BaseAdapter):
                 trades = self.binance_api.get_user_trades(symbol=symbol, start_time=since_ts_ms)
                 return trades
             
+            # Broker Gateway MCP：从 broker_client 的 fill_map 获取成交（dry-run/mock模式）
+            if self.broker_client and hasattr(self.broker_client, 'fill_map'):
+                fills = []
+                for client_order_id, fill_list in self.broker_client.fill_map.items():
+                    for fill in fill_list:
+                        if fill.symbol == symbol:
+                            if since_ts_ms is None or fill.ts_ms >= since_ts_ms:
+                                fills.append({
+                                    "ts_ms": fill.ts_ms,
+                                    "symbol": fill.symbol,
+                                    "client_order_id": fill.client_order_id,
+                                    "broker_order_id": fill.broker_order_id,
+                                    "price": fill.price,
+                                    "qty": fill.qty,
+                                    "fee": fill.fee,
+                                    "liquidity": fill.liquidity,
+                                    "side": fill.side.value if fill.side else None,
+                                })
+                return fills
+            
             # Broker Gateway MCP暂不支持成交查询
             return []
             

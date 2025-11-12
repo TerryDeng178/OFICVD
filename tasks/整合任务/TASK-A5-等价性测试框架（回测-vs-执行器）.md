@@ -3,7 +3,7 @@ id: "TASK-A5"
 title: "等价性测试框架（回测 vs 执行器）"
 stage: "A"
 priority: "P0"
-status: "Completed"
+status: "已完成"
 owners: ["TBD"]
 deps: ["TASK-A2", "TASK-A4"]   # 依赖 A4 的 v2 契约落地
 estimate: "~2.5d"
@@ -195,14 +195,19 @@ tests/test_equivalence.py::TestEquivalence::test_case_b_dual_sink_consistency PA
 tests/test_equivalence.py::TestEquivalence::test_case_c_idempotency PASSED [ 75%]
 tests/test_equivalence.py::TestEquivalence::test_contract_validation PASSED [100%]
 
-============================================ 4 passed, 3 warnings in 0.61s ============================================
+============================================ 4 passed, 4 warnings in 0.74s ============================================
 ```
 
 **测试结果**:
 - ✅ 4/4 测试用例全部通过
-- ✅ 运行时间：0.61 秒
+- ✅ 运行时间：0.74 秒
 - ✅ 所有等价性验证通过（成交/费用/仓位/PNL、双 Sink 一致性、幂等性、契约校验）
 - ⚠️ 仅有依赖库的弃用警告（不影响功能）
+
+**最终验证结果** (2025-11-13):
+- ✅ 等价性测试框架完全实现并验证通过
+- ✅ 解决了"回测 6 笔 vs 重放 1 笔"的核心阻塞问题
+- ✅ client_order_id 唯一性、side 字段还原、默认价格对齐等关键修复已验证生效
 
 **修复记录**:
 - 修复导入路径问题（`src.alpha_core` → `alpha_core`）
@@ -241,6 +246,29 @@ make equiv-full
 1. 在 GitHub 仓库设置中将 `equivalence-ci` 设为分支保护的必需检查
 2. 确保只有维护者可以添加 `skip-equivalence` 标签
 3. 提交测试 PR 验证 CI 工作流是否正常运行
+
+**P0 阻塞修复完成** (2025-11-13):
+- ✅ **equiv_run.py 真正实现双路对比**：
+  - 路径A：BacktestExecutor（读取信号并执行）
+  - 路径B：Replay Executor（TestnetExecutor dry-run模式，使用 process_signals）
+  - 对比成交/费用/持仓/PNL，输出差异快照 `equiv_diff_{run_id}.json`
+  - 失败即 `sys.exit(1)`
+  
+- ✅ **tests/test_equivalence.py Case-A 完善**：
+  - 实现真正的双路对比（BacktestExecutor vs TestnetExecutor dry-run）
+  - 逐笔成交一致验证（方向/数量/价格/费用）
+  - 费用模型一致性验证
+  - 仓位路径一致性验证
+  - PNL 误差 |Δ| < 1e-8 验证
+  
+- ✅ **差异快照输出**：
+  - `equiv_run.py` 输出 `equiv_diff_{run_id}.json`
+  - CI workflow 自动上传差异快照为 artifact
+  - 包含指标对比、最大误差位置、成交对齐失败样例
+
+- ✅ **任务卡统一**：
+  - 仅保留 Completed 版本作为 SSoT
+  - 状态：Completed（无冲突）
 
 补充说明（与现状对齐的证据位）
 

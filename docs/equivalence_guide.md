@@ -272,3 +272,4 @@ diff -u runtime/equiv_test_1/equiv_result_*.json runtime/equiv_test_2/equiv_resu
 - `tests/test_equivalence.py`: 核心测试用例
 - `scripts/equiv_run.py`: 统一入口脚本
 
+

@@ -95,6 +95,9 @@ class TestnetExecutor(IExecutor):
         # Testnet模式：如果dry_run=True则使用Mock，否则使用真实API
         broker_cfg_with_mock["mock_enabled"] = broker_cfg.get("dry_run", True) or broker_cfg.get("mock_enabled", True)
         broker_cfg_with_mock["mock_output_path"] = str(self.output_dir / "mock_orders.jsonl")
+        # 传递 backtest 配置以便 BrokerGatewayClient 在 mock 模式下使用相同的滑点和费用参数
+        if "backtest" in cfg:
+            broker_cfg_with_mock["backtest"] = cfg["backtest"]
         self.broker_client = BrokerGatewayClient(broker_cfg_with_mock)
         
         logger.info(
@@ -301,6 +304,15 @@ class TestnetExecutor(IExecutor):
             # 转换适配器成交格式到Fill对象（简化处理）
             for af in adapter_fills:
                 if isinstance(af, dict):
+                    side_raw = af.get("side")
+                    side = None
+                    if isinstance(side_raw, str):
+                        s = side_raw.lower()
+                        if s in ("buy", "b", "long"):
+                            side = Side.BUY
+                        elif s in ("sell", "s", "short"):
+                            side = Side.SELL
+
                     fill = Fill(
                         ts_ms=af.get("ts_ms", 0),
                         symbol=af.get("symbol", symbol),
@@ -310,6 +322,7 @@ class TestnetExecutor(IExecutor):
                         qty=af.get("qty", 0.0),
                         fee=af.get("fee", 0.0),
                         liquidity=af.get("liquidity", "unknown"),
+                        side=side,  # <- 关键修复：恢复 side 字段
                     )
                     all_fills.append(fill)
         

@@ -100,7 +100,7 @@ class TestPnLRolloverBoundaries:
         assert date_mon == "2025-01-06"
     
     def test_dst_transition_america_new_york(self, tmp_path: Path):
-        """T5: DST切换（America/New_York）"""
+        """T5: DST切换（America/New_York）- 春季向前跳"""
         try:
             import pytz
         except ImportError:
@@ -131,6 +131,128 @@ class TestPnLRolloverBoundaries:
         # 这里主要验证不会因为DST切换而崩溃
         assert date_before in ["2024-03-10", "2024-03-09"]
         assert date_after in ["2024-03-10", "2024-03-11"]
+    
+    def test_dst_fallback_america_new_york(self, tmp_path: Path):
+        """P1-3: DST切换（America/New_York）- 秋季向后跳"""
+        try:
+            import pytz
+        except ImportError:
+            pytest.skip("pytz not available")
+        
+        config = {
+            "rollover_timezone": "America/New_York",
+            "rollover_hour": 0,
+        }
+        trade_sim = TradeSimulator(config, tmp_path)
+        
+        # 2024年11月3日（DST结束，时钟向后跳1小时）
+        # 02:00:00 EDT → 01:00:00 EST（重复1小时）
+        tz_ny = pytz.timezone("America/New_York")
+        
+        # DST结束前（01:59:59 EDT）
+        dt_before_fallback = tz_ny.localize(datetime(2024, 11, 3, 1, 59, 59))
+        ts_before = int(dt_before_fallback.timestamp() * 1000)
+        
+        # DST结束后（01:00:01 EST，实际是同一UTC时间）
+        dt_after_fallback = tz_ny.localize(datetime(2024, 11, 3, 1, 0, 1), is_dst=False)
+        ts_after = int(dt_after_fallback.timestamp() * 1000)
+        
+        date_before = trade_sim._biz_date(ts_before)
+        date_after = trade_sim._biz_date(ts_after)
+        
+        # 验证不会因为DST回退而崩溃
+        assert date_before in ["2024-11-03", "2024-11-02"]
+        assert date_after in ["2024-11-03", "2024-11-02"]
+    
+    def test_dst_cross_month_ny(self, tmp_path: Path):
+        """P1-3: NY时区跨DST切换 + 跨月边界"""
+        try:
+            import pytz
+        except ImportError:
+            pytest.skip("pytz not available")
+        
+        config = {
+            "rollover_timezone": "America/New_York",
+            "rollover_hour": 0,
+        }
+        trade_sim = TradeSimulator(config, tmp_path)
+        
+        tz_ny = pytz.timezone("America/New_York")
+        
+        # 2024年3月9日（DST切换前一天）23:59:59 EST
+        dt_mar9 = tz_ny.localize(datetime(2024, 3, 9, 23, 59, 59))
+        ts_mar9 = int(dt_mar9.timestamp() * 1000)
+        
+        # 2024年3月10日（DST切换日）00:00:01 EDT（实际是03:00:01 UTC）
+        dt_mar10 = tz_ny.localize(datetime(2024, 3, 10, 0, 0, 1))
+        ts_mar10 = int(dt_mar10.timestamp() * 1000)
+        
+        date_mar9 = trade_sim._biz_date(ts_mar9)
+        date_mar10 = trade_sim._biz_date(ts_mar10)
+        
+        # 验证跨日正确
+        assert date_mar9 == "2024-03-09"
+        assert date_mar10 == "2024-03-10"
+    
+    def test_cross_month_small_sample(self, tmp_path: Path):
+        """P1-3: 跨月/跨年窗口的小样本回归"""
+        config = {
+            "rollover_timezone": "UTC",
+            "rollover_hour": 0,
+        }
+        trade_sim = TradeSimulator(config, tmp_path)
+        
+        # 测试跨月边界的小样本
+        # 1月31日23:59:59 → 2月1日00:00:01
+        ts_jan_end = int(datetime(2025, 1, 31, 23, 59, 59, tzinfo=timezone.utc).timestamp() * 1000)
+        ts_feb_start = int(datetime(2025, 2, 1, 0, 0, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        
+        date_jan = trade_sim._biz_date(ts_jan_end)
+        date_feb = trade_sim._biz_date(ts_feb_start)
+        
+        assert date_jan == "2025-01-31"
+        assert date_feb == "2025-02-01"
+        
+        # 测试跨年边界的小样本
+        # 12月31日23:59:59 → 1月1日00:00:01
+        ts_dec_end = int(datetime(2024, 12, 31, 23, 59, 59, tzinfo=timezone.utc).timestamp() * 1000)
+        ts_jan_start = int(datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        
+        date_dec = trade_sim._biz_date(ts_dec_end)
+        date_jan = trade_sim._biz_date(ts_jan_start)
+        
+        assert date_dec == "2024-12-31"
+        assert date_jan == "2025-01-01"
+    
+    def test_dst_with_custom_rollover_hour(self, tmp_path: Path):
+        """P1-3: DST切换 + 自定义rollover_hour（08:00切日）"""
+        try:
+            import pytz
+        except ImportError:
+            pytest.skip("pytz not available")
+        
+        config = {
+            "rollover_timezone": "America/New_York",
+            "rollover_hour": 8,  # 08:00切日
+        }
+        trade_sim = TradeSimulator(config, tmp_path)
+        
+        tz_ny = pytz.timezone("America/New_York")
+        
+        # 2024年3月10日（DST切换日）07:59:59 EST（应该属于3月9日）
+        dt_before_rollover = tz_ny.localize(datetime(2024, 3, 10, 7, 59, 59))
+        ts_before = int(dt_before_rollover.timestamp() * 1000)
+        
+        # 2024年3月10日08:00:01 EDT（应该属于3月10日）
+        dt_after_rollover = tz_ny.localize(datetime(2024, 3, 10, 8, 0, 1))
+        ts_after = int(dt_after_rollover.timestamp() * 1000)
+        
+        date_before = trade_sim._biz_date(ts_before)
+        date_after = trade_sim._biz_date(ts_after)
+        
+        # 验证自定义rollover_hour在DST切换时仍然正确
+        assert date_before == "2024-03-09"
+        assert date_after == "2024-03-10"
     
     def test_cross_timezone_consistency(self, tmp_path: Path):
         """P1.2: 跨时区一致性测试（Asia/Tokyo vs UTC）"""

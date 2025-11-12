@@ -35,5 +35,7 @@ jobs:
         if: always()
         with:
           name: equivalence-nightly-reports
-          path: reports/
+          path: |
+            reports/
+            runtime/equiv_test/equiv_diff_*.json
 

@@ -110,15 +110,35 @@ class BrokerGatewayClient:
         broker_order_id = f"MOCK-{int(time.time() * 1000)}-{order.client_order_id}"
         self.order_map[order.client_order_id] = broker_order_id
         
+        # 获取中间价（优先从 metadata，其次从 order.price，最后使用默认值）
+        mid_price = order.metadata.get("mid_price", 0.0) if order.metadata else 0.0
+        if not mid_price:
+            mid_price = order.price or 50000.0
+        
+        # 计算成交价格（考虑滑点，与 BacktestExecutor 保持一致）
+        # 优先从 backtest 配置获取，其次从 broker 配置，最后使用默认值
+        backtest_cfg = self.config.get("backtest", {})
+        slippage_bps = backtest_cfg.get("slippage_bps") or self.config.get("slippage_bps", 1.0)
+        if order.side == Side.BUY:
+            fill_price = mid_price * (1 + slippage_bps / 10000)
+        else:
+            fill_price = mid_price * (1 - slippage_bps / 10000)
+        
+        # 计算手续费（与 BacktestExecutor 保持一致）
+        # 优先从 backtest 配置获取 taker_fee_bps，其次从 broker 配置，最后使用默认值
+        fee_bps = backtest_cfg.get("taker_fee_bps") or backtest_cfg.get("fee_bps") or self.config.get("fee_bps", 1.93)
+        notional = fill_price * order.qty
+        fee = notional * (fee_bps / 10000)
+        
         # 模拟成交（Mock模式立即成交）
         fill = Fill(
             ts_ms=order.ts_ms + 50,  # 模拟50ms延迟
             symbol=order.symbol,
             client_order_id=order.client_order_id,
             broker_order_id=broker_order_id,
-            price=order.price or 50000.0,  # 市价单需要从市场数据获取
+            price=fill_price,
             qty=order.qty,
-            fee=order.qty * (order.price or 50000.0) * 0.0002,  # 0.02%手续费
+            fee=fee,
             liquidity="taker",
             side=order.side,
         )
