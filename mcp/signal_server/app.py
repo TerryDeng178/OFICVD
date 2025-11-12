@@ -191,7 +191,23 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         sink_kind=args.sink,
         output_dir=args.out,
     )
-    
+
+    # TASK-B1 P1: Signal启动固定输出JSON日志套，便于orchestrator提取sink_used
+    try:
+        sink_health = algo._sink.get_health() if hasattr(algo, '_sink') and algo._sink else {}
+        sink_used = sink_health.get('kind', 'unknown')
+        schema_version = 'v2' if hasattr(algo, '_sink') and 'v2' in str(type(algo._sink)) else 'v1'
+
+        boot_log = {
+            "kind": "signal_boot",
+            "sink_used": sink_used,
+            "schema": schema_version,
+            "timestamp": int(time.time() * 1000)
+        }
+        print(json.dumps(boot_log, ensure_ascii=False), flush=True)
+    except Exception as e:
+        logger.warning(f"[signal_server] 生成启动日志失败: {e}")
+
     # TASK-07A: 启动时打印Sink运行态（不可关闭），确认实际使用的sink类型
     try:
         sink_health = algo._sink.get_health() if hasattr(algo, '_sink') and algo._sink else {}

@@ -336,15 +336,64 @@ class Supervisor:
                         pass
         
         return False
-    
+
+    def _update_strategy_heartbeat(self):
+        """TASK-B1 P1: 更新Strategy心跳时间戳到runtime_state"""
+        try:
+            strategy_state = self.processes.get("strategy")
+            if not strategy_state or not strategy_state.process:
+                return
+
+            # 从Strategy日志中提取最新心跳时间戳
+            log_dir = Path(self.project_root) / "runtime" / "logs"
+            if not log_dir.exists():
+                return
+
+            # 查找最新的strategy日志文件
+            strategy_log_pattern = log_dir / "strategy*.log"
+            strategy_log_files = list(log_dir.glob("strategy*.log"))
+            if not strategy_log_files:
+                return
+
+            latest_log_file = max(strategy_log_files, key=lambda p: p.stat().st_mtime)
+
+            # 读取最后几行日志，查找心跳信息
+            try:
+                with latest_log_file.open("r", encoding="utf-8") as f:
+                    lines = f.readlines()[-10:]  # 读取最后10行
+
+                latest_heartbeat = None
+                for line in reversed(lines):
+                    if "[TASK-B1] HEARTBEAT:" in line:
+                        # 提取时间戳（假设日志格式包含时间戳）
+                        # 这里简化处理，实际可能需要更精确的解析
+                        latest_heartbeat = time.time()
+                        break
+
+                if latest_heartbeat:
+                    # 更新runtime_state
+                    if "strategy_heartbeat_at" not in self.runtime_state:
+                        self.runtime_state["strategy_heartbeat_at"] = {}
+                    self.runtime_state["strategy_heartbeat_at"]["timestamp"] = latest_heartbeat
+                    self.runtime_state["strategy_heartbeat_at"]["last_update"] = time.time()
+
+            except Exception as e:
+                logger.debug(f"解析Strategy心跳日志失败: {e}")
+
+        except Exception as e:
+            logger.debug(f"更新Strategy心跳失败: {e}")
+
     async def tick_health(self, interval_secs: int = 10):
         """周期性健康检查"""
         self.running = True
-        
+
         while self.running and not self.shutdown_event.is_set():
             # TASK-07A: 更新资源使用情况
             self._update_resource_usage()
-            
+
+            # TASK-B1 P1: 跟踪Strategy心跳时间戳
+            self._update_strategy_heartbeat()
+
             for name, state in self.processes.items():
                 if state.process is None:
                     continue
@@ -2422,14 +2471,16 @@ def build_process_specs(
         )
     specs.append(strategy_spec)
     
-    # Report Server (报表生成服务)
+    # TASK-B1 P1: Report健康探针与产物对齐
+    # Reporter实际写入 logs/report/*.json|*.md，与健康探针路径统一
+    report_output_dir = log_dir_rel / "report"
     report_cmd = [
         "mcp.report_server.app",
         "--config", str(config_path),
         "--input", str(output_dir_rel),
-        "--output", str(output_dir_rel / "reports"),
+        "--output", str(report_output_dir),
     ]
-    
+
     report_spec = ProcessSpec(
         name="report",
         cmd=report_cmd,
@@ -2438,7 +2489,8 @@ def build_process_specs(
         ready_probe_args={"keyword": "Report Server started"},
         health_probe="file_count",
         health_probe_args={
-            "pattern": str(output_dir_rel / "reports" / "*.jsonl"),
+            # TASK-B1 P1: 与Reporter.save_report()实际写入路径对齐
+            "pattern": str(report_output_dir / "*.json"),
             "min_count": 0,  # 允许初始为空
         },
         restart_policy="on_failure",

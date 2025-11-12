@@ -61,6 +61,17 @@ jobs:
           V13_REPLAY_MODE: "1"   # 回放一致性
           CI_MODE: "light"       # 测试用小样例/快速路径
 
+      # TASK-B1 P1: JSONL↔SQLite等价性回归测试
+      - name: Run sink equivalence tests
+        run: |
+          mkdir -p reports
+          python -m pytest tests/test_sink_equivalence.py \
+            --maxfail=1 --disable-warnings \
+            --junitxml=reports/sink_equivalence.xml \
+            -v
+        env:
+          CI_MODE: "light"
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -68,4 +79,5 @@ jobs:
           path: |
             reports/
             runtime/equiv_test/equiv_diff_*.json
+            runtime/sink_test/
 
