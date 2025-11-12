@@ -215,6 +215,7 @@ class DataAligner:
                 return None
             
             # P0修复: 修复真假值判断（0值误判问题）
+            # 修复：优先从orderbook_buf新增字段读取，如果没有则从bids/asks现算
             best_bid = orderbook.get("best_bid")
             if best_bid is None:
                 best_bid = orderbook.get("bid_price")
@@ -222,11 +223,26 @@ class DataAligner:
             if best_ask is None:
                 best_ask = orderbook.get("ask_price")
             
+            # 兜底：如果字段缺失，从bids/asks现算
+            if best_bid is None or best_ask is None or best_bid <= 0 or best_ask <= 0:
+                bids = orderbook.get("bids", [])
+                asks = orderbook.get("asks", [])
+                if bids and len(bids) > 0 and bids[0][0] > 0:
+                    best_bid = bids[0][0]
+                if asks and len(asks) > 0 and asks[0][0] > 0:
+                    best_ask = asks[0][0]
+            
             if best_bid is None or best_ask is None or best_bid <= 0 or best_ask <= 0:
                 return None
             
-            # Compute spread_bps
-            spread_bps = ((best_ask - best_bid) / mid) * 10000 if mid > 0 else 0.0
+            # 重新计算mid（如果之前没有）
+            if mid is None or mid <= 0:
+                mid = (best_bid + best_ask) / 2 if (best_bid > 0 and best_ask > 0) else 0.0
+            
+            # Compute spread_bps（优先从orderbook读取，如果没有则现算）
+            spread_bps = orderbook.get("spread_bps")
+            if spread_bps is None or spread_bps == 0.0:
+                spread_bps = ((best_ask - best_bid) / mid) * 10000 if mid > 0 else 0.0
             
             # P0: 细化scenario_2x2标签
             # A/Q: 活跃度代理（每秒quote更新或trades/min）

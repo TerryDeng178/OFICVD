@@ -1,0 +1,28 @@
+{
+  "stage": 1,
+  "description": "F3组：反向防抖 & 翻向重臂（抑制亏损翻手）",
+  "target": "win_rate_trades ≥ 35%、avg_pnl_per_trade ≥ 0、pnl_net ≥ 0",
+  "search_space": {
+    "components.fusion.flip_rearm_margin": [0.5, 0.8, 1.0],
+    "strategy.cooldown_after_exit_sec": [60, 120, 180],
+    "note": "F3: 反向防抖参数，抑制亏损翻手单"
+  },
+  "constraints": {
+    "trades_per_hour": {
+      "max": 30,
+      "description": "频率软约束 ≤30/h"
+    },
+    "drawdown_convergence": {
+      "description": "持仓回撤/连环亏损明显收敛"
+    }
+  },
+  "scoring_weights": {
+    "win_rate_trades": 0.40,
+    "pnl_net": 0.30,
+    "avg_pnl_per_trade": 0.20,
+    "trades_per_hour": 0.10,
+    "trades_per_hour_threshold": 30,
+    "cost_bps_on_turnover": 0.0,
+    "description": "F3: 重点优化胜率和PNL，成本权重设为0"
+  }
+}

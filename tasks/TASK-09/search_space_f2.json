@@ -1,0 +1,32 @@
+{
+  "stage": 1,
+  "description": "F2组：融合权重与阈值（提\"信号纯度\"）",
+  "target": "win_rate_trades ≥ 35%、avg_pnl_per_trade ≥ 0、pnl_net ≥ 0",
+  "search_space": {
+    "components.fusion.w_ofi": [0.7, 0.6, 0.5],
+    "components.fusion.w_cvd": [0.3, 0.4, 0.5],
+    "signal.thresholds.active.buy": [1.2, 1.5, 1.8],
+    "signal.thresholds.active.sell": [-1.8, -1.5, -1.2],
+    "components.fusion.adaptive_cooldown_k": [0.8, 1.0, 1.2],
+    "note": "F2: 融合权重与阈值，w_ofi + w_cvd = 1.0（需在代码中确保）"
+  },
+  "constraints": {
+    "trades_per_hour": {
+      "max": 30,
+      "description": "频率软约束 ≤30/h"
+    },
+    "frequency_increase": {
+      "max_percent": 20,
+      "description": "若频率上升>20%则降权"
+    }
+  },
+  "scoring_weights": {
+    "win_rate_trades": 0.40,
+    "pnl_net": 0.30,
+    "avg_pnl_per_trade": 0.20,
+    "trades_per_hour": 0.10,
+    "trades_per_hour_threshold": 30,
+    "cost_bps_on_turnover": 0.0,
+    "description": "F2: 重点优化胜率和PNL，成本权重设为0"
+  }
+}

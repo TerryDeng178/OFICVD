@@ -161,8 +161,8 @@ class Supervisor:
         """启动所有启用的模块"""
         logger.info(f"开始启动模块: {enabled_modules}")
         
-        # 启动顺序：harvest -> signal -> broker -> report
-        order = ["harvest", "signal", "broker", "report"]
+        # 启动顺序：harvest -> signal -> strategy -> broker -> report
+        order = ["harvest", "signal", "strategy", "broker", "report"]
         
         for name in order:
             if name in enabled_modules and name in self.processes:
@@ -535,8 +535,8 @@ class Supervisor:
         self.running = False
         self.shutdown_event.set()
         
-        # TASK-07A: 记录关闭顺序：report -> broker -> signal -> harvest
-        order = ["report", "broker", "signal", "harvest"]
+        # TASK-07A: 记录关闭顺序：report -> broker -> strategy -> signal -> harvest
+        order = ["report", "broker", "strategy", "signal", "harvest"]
         
         for name in order:
             if name in self.processes:
@@ -2332,8 +2332,79 @@ def build_process_specs(
     )
     specs.append(broker_spec)
     
-    # Report Server (可选，或由 Orchestrator 内置实现)
-    # 这里我们由 Orchestrator 内置实现，不单独启动进程
+    # Strategy Server (新增：策略执行服务，包含风控模块)
+    strategy_env = {
+        "RUN_ID": run_id,
+        "RISK_INLINE_ENABLED": os.getenv("RISK_INLINE_ENABLED", "false"),  # 默认关闭，回退到legacy
+    }
+    # TASK-A4: 传递 Binance API 凭证给 strategy 进程（testnet/live 模式需要）
+    if os.getenv("BINANCE_API_KEY"):
+        strategy_env["BINANCE_API_KEY"] = os.getenv("BINANCE_API_KEY")
+    if os.getenv("BINANCE_API_SECRET"):
+        strategy_env["BINANCE_API_SECRET"] = os.getenv("BINANCE_API_SECRET")
+    
+    # 确定signals目录（单一事实来源）
+    signals_dir = output_dir_rel / "ready" / "signal"
+    
+    # 确定executor模式（从环境变量或配置）
+    executor_mode = os.getenv("EXECUTOR_MODE", "testnet")  # testnet | live | backtest
+    
+    strategy_cmd = [
+        "mcp.strategy_server.app",
+        "--mode", executor_mode,
+        "--config", str(config_path),
+        "--signals-source", "auto",  # 自动检测JSONL或SQLite
+        "--output", str(output_dir_rel),
+        "--watch",  # TASK-A4: 启用持续监听模式，避免进程退出重启
+    ]
+    
+    # 如果sink不是dual，传递给strategy_server
+    if sink_kind != "dual":
+        strategy_cmd.extend(["--sink", sink_kind])
+    
+    if symbols:
+        strategy_cmd.extend(["--symbols"] + symbols)
+    
+    strategy_spec = ProcessSpec(
+        name="strategy",
+        cmd=strategy_cmd,
+        env=strategy_env,
+        ready_probe="log_keyword",
+        ready_probe_args={"keywords": ["Strategy Server", "Creating", "executor", "Reading signals", "started and ready"]},  # 支持多个关键词（包括 watch 模式）
+        health_probe="file_count",
+        health_probe_args={
+            "pattern": str(output_dir_rel / "ready" / "execlog" / "**" / "*.jsonl"),
+            "min_count": 0,  # 允许初始为空
+            "min_new_last_seconds": min_new_last_seconds,
+        },
+        restart_policy="on_failure",
+        max_restarts=2
+    )
+    specs.append(strategy_spec)
+    
+    # Report Server (报表生成服务)
+    report_cmd = [
+        "mcp.report_server.app",
+        "--config", str(config_path),
+        "--input", str(output_dir_rel),
+        "--output", str(output_dir_rel / "reports"),
+    ]
+    
+    report_spec = ProcessSpec(
+        name="report",
+        cmd=report_cmd,
+        env={"RUN_ID": run_id},
+        ready_probe="log_keyword",
+        ready_probe_args={"keyword": "Report Server started"},
+        health_probe="file_count",
+        health_probe_args={
+            "pattern": str(output_dir_rel / "reports" / "*.jsonl"),
+            "min_count": 0,  # 允许初始为空
+        },
+        restart_policy="on_failure",
+        max_restarts=2
+    )
+    specs.append(report_spec)
     
     return specs
 

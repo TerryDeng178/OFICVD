@@ -39,6 +39,14 @@ logs/
 # Environment
 .env
 .env.local
+.env.*.local
+
+# API密钥文件（不要提交）
+*.key
+*.secret
+*_api_key.txt
+*_secret_key.txt
+binance_*.env
 
 # OS
 .DS_Store

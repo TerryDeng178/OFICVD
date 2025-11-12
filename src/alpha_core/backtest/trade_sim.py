@@ -18,11 +18,14 @@ class TradeSimulator:
         config: Dict,
         output_dir: Path,
         ignore_gating_in_backtest: bool = False,
+        core_algo: Optional[Any] = None,  # F3修复: CoreAlgorithm实例，用于记录退出时间
     ):
         """
         Args:
             config: Backtest configuration (backtest section)
             output_dir: Output directory for trades and PnL
+            ignore_gating_in_backtest: Ignore gating in backtest
+            core_algo: CoreAlgorithm instance for F3 cooldown_after_exit_sec support
         """
         self.config = config
         self.output_dir = Path(output_dir)
@@ -30,6 +33,11 @@ class TradeSimulator:
         
         # P0: 回测信号入口门控可选绕过（用于纯策略收益评估）
         self.ignore_gating_in_backtest = ignore_gating_in_backtest
+        
+        # F3修复: 保存CoreAlgorithm实例引用
+        self.core_algo = core_algo
+        if self.core_algo:
+            logger.info("[TradeSim] F3: CoreAlgorithm实例已连接，退出后冷静期功能已启用")
         
         # P1: PnL日切口径（UTC vs 本地）
         # P1增强: 支持自定义rollover_hour（如08:00切日）
@@ -100,7 +108,21 @@ class TradeSimulator:
             "sell": 0.8,  # 卖出更容易taker
         }
         self.side_bias = self.fee_maker_taker_config.get("side_bias", default_side_bias)
-        self.maker_fee_ratio = self.fee_maker_taker_config.get("maker_fee_ratio", 0.5)  # Maker费率相对taker的比率
+        self.maker_fee_ratio = self.fee_maker_taker_config.get("maker_fee_ratio", 0.4)  # Maker费率相对taker的比率
+        
+        # F2: Maker记账模式（阈值 vs 伯努利抽样）
+        self.maker_accounting_mode = self.fee_maker_taker_config.get("accounting_mode", "threshold")  # "threshold" or "bernoulli"
+        self.maker_threshold = self.fee_maker_taker_config.get("maker_threshold", 0.5)  # 阈值模式的阈值（默认0.5）
+        self.bernoulli_seed = self.fee_maker_taker_config.get("bernoulli_seed", 42)  # 伯努利抽样的随机种子（保证可复现）
+        
+        # 初始化随机数生成器（用于伯努利抽样）
+        if self.maker_accounting_mode == "bernoulli":
+            import random
+            self.rng = random.Random(self.bernoulli_seed)
+            logger.info(f"[TradeSim] Maker accounting mode: bernoulli (seed={self.bernoulli_seed})")
+        else:
+            self.rng = None
+            logger.info(f"[TradeSim] Maker accounting mode: threshold (threshold={self.maker_threshold})")
         
         logger.info(f"[TradeSim] Slippage model: {self.slippage_model}, Fee model: {self.fee_model}")
         if self.slippage_model == "piecewise":
@@ -362,7 +384,17 @@ class TradeSimulator:
             # P1-2: 概率规则已参数化，从配置读取
             # 获取市场上下文
             fd = signal.get("_feature_data", {}) if signal else {}
-            spread_bps = float(fd.get("spread_bps") or 0.0)
+            spread_bps_raw = fd.get("spread_bps")
+            spread_bps = float(spread_bps_raw) if spread_bps_raw is not None else 0.0
+            
+            # 兜底：当spread_bps缺失或为0时，尝试从best_bid/best_ask现算
+            if spread_bps == 0.0:
+                best_bid = fd.get("best_bid")
+                best_ask = fd.get("best_ask")
+                if best_bid and best_ask and best_bid > 0 and best_ask > 0:
+                    mid_price_val = (best_bid + best_ask) / 2
+                    if mid_price_val > 0:
+                        spread_bps = ((best_ask - best_bid) / mid_price_val) * 10000
             raw_scenario = fd.get("scenario_2x2", "") or (signal.get("scenario", "") if signal else "")
             
             # P0修复: 标准化scenario格式（A_H_unknown -> A_H）
@@ -523,8 +555,13 @@ class TradeSimulator:
         # P1.5/P2.1: 获取feature_data（用于场景标签和费率层级）
         feature_data = signal.get("_feature_data", {}) if signal else {}
         
-        # P0-3: 使用概率期望判断maker/taker（而非简单的side判定）
-        is_maker = maker_prob > 0.5  # 概率>50%视为maker
+        # F2: Maker记账模式（阈值 vs 伯努利抽样）
+        if self.maker_accounting_mode == "bernoulli":
+            # 伯努利抽样：根据概率随机决定
+            is_maker = self.rng.random() < maker_prob
+        else:
+            # 阈值模式：概率>阈值视为maker
+            is_maker = maker_prob > self.maker_threshold
         
         # Record position
         # P0修复: 保存entry_notional用于turnover计算
@@ -544,6 +581,10 @@ class TradeSimulator:
         
         # Create trade record
         # P1.5: 添加scenario_2x2和session到trade记录（用于Metrics维度拆分）
+        # P0修复: 添加成本观测指标
+        spread_bps_raw = feature_data.get("spread_bps")
+        spread_bps = float(spread_bps_raw) if spread_bps_raw is not None else 0.0
+        effective_spread_bps = abs(slippage_bps) + spread_bps  # 含滑点的有效价差
         trade = {
             "ts_ms": ts_ms,
             "symbol": symbol,
@@ -557,6 +598,11 @@ class TradeSimulator:
             # P1.5: 添加场景和会话标签
             "scenario_2x2": feature_data.get("scenario_2x2"),
             "session": feature_data.get("session"),
+            # P0修复: 成本观测指标
+            "maker_probability": maker_prob,
+            "is_maker_actual": is_maker,
+            "effective_spread_bps": effective_spread_bps,
+            "spread_bps": spread_bps,
         }
         
         self._record_trade(trade)
@@ -619,6 +665,14 @@ class TradeSimulator:
                 self._record_trace(ts_ms, symbol, side, "exit", signal, position, "stop_loss")
             return exit_trade
         
+        # P0修复: 如果force_timeout_exit启用，达到min_hold_time_sec后强制退出（优先级高于TP/反向）
+        if self.force_timeout_exit and self.min_hold_time_sec and hold_time_sec >= self.min_hold_time_sec:
+            # P0修复: 强制超时平仓（无需反向信号或TP）
+            exit_trade = self._exit_position(position, ts_ms, mid_price, "timeout", signal)
+            if exit_trade:
+                self._record_trace(ts_ms, symbol, side, "exit", signal, position, "timeout")
+            return exit_trade
+        
         # 修复B: 2) 未达最小持仓 → 禁止TP/反向退出（可通过配置开例外）
         if self.min_hold_time_sec and hold_time_sec < self.min_hold_time_sec:
             # 验证不变量2: hold_time_sec < min_hold_time_sec期间，不允许触发reverse_signal与take_profit
@@ -662,15 +716,6 @@ class TradeSimulator:
             if exit_trade:
                 self._record_trace(ts_ms, symbol, side, "exit", signal, position, "reverse_signal")
             return exit_trade
-        
-        # 修复B: 4) 超时离场（保留现逻辑）
-        if self.min_hold_time_sec and hold_time_sec >= self.min_hold_time_sec:
-            if self.force_timeout_exit:
-                # P0修复: 强制超时平仓（无需反向信号）
-                exit_trade = self._exit_position(position, ts_ms, mid_price, "timeout", signal)
-                if exit_trade:
-                    self._record_trace(ts_ms, symbol, side, "exit", signal, position, "timeout")
-                return exit_trade
         
         return None
     
@@ -719,6 +764,17 @@ class TradeSimulator:
         # Create trade record
         # P1.5: 添加scenario_2x2和session到trade记录（用于Metrics维度拆分）
         feature_data = signal.get("_feature_data", {}) if signal else {}
+        # P0修复: 添加成本观测指标
+        spread_bps_raw = feature_data.get("spread_bps")
+        spread_bps = float(spread_bps_raw) if spread_bps_raw is not None else 0.0
+        effective_spread_bps = abs(slippage_bps) + spread_bps  # 含滑点的有效价差
+        # F2: Maker记账模式（阈值 vs 伯努利抽样）
+        if self.maker_accounting_mode == "bernoulli":
+            # 伯努利抽样：根据概率随机决定
+            is_maker_exit = self.rng.random() < exit_maker_prob
+        else:
+            # 阈值模式：概率>阈值视为maker
+            is_maker_exit = exit_maker_prob > self.maker_threshold
         trade = {
             "ts_ms": ts_ms,
             "symbol": symbol,
@@ -734,7 +790,19 @@ class TradeSimulator:
             # P1.5: 添加场景和会话标签
             "scenario_2x2": feature_data.get("scenario_2x2"),
             "session": feature_data.get("session"),
+            # P0修复: 成本观测指标
+            "maker_probability": exit_maker_prob,
+            "is_maker_actual": is_maker_exit,
+            "effective_spread_bps": effective_spread_bps,
+            "spread_bps": spread_bps,
         }
+        
+        # F3修复: 记录退出时间到CoreAlgorithm（用于退出后冷静期）
+        if self.core_algo and hasattr(self.core_algo, 'record_exit'):
+            try:
+                self.core_algo.record_exit(symbol, ts_ms)
+            except Exception as e:
+                logger.warning(f"[TradeSim] F3: 记录退出时间失败: {e}")
         
         # P1增强: Update daily PnL with timezone-aware date rollover (using _biz_date)
         date_str = self._biz_date(ts_ms)

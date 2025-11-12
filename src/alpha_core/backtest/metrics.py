@@ -52,10 +52,13 @@ class MetricsAggregator:
                 "total_slippage": 0.0,
                 "total_turnover": 0.0,
                 "win_rate": 0.0,  # 日口径
-                "win_rate_trades": 0.0,  # 交易口径
-                "cost_bps_on_turnover": 0.0,  # 成本bps
-                "risk_reward_ratio": 0.0,
-                "sharpe_ratio": 0.0,
+            "win_rate_trades": 0.0,  # 交易口径
+            "pnl_net": 0.0,  # F系列: 净PnL
+            "avg_pnl_per_trade": 0.0,  # F系列: 平均单笔收益
+            "pnl_per_trade": 0.0,  # 兼容保留
+            "cost_bps_on_turnover": 0.0,  # 成本bps
+            "risk_reward_ratio": 0.0,
+            "sharpe_ratio": 0.0,
                 "sortino_ratio": 0.0,
                 "max_drawdown": 0.0,
                 "MAR": 0.0,
@@ -69,6 +72,13 @@ class MetricsAggregator:
                 "turnover_taker": 0.0,
                 "fee_tier_distribution": {},
                 "avg_ret1s_bps": 0.0,
+                # P0修复: 成本观测指标
+                "maker_ratio_actual": 0.0,
+                "taker_ratio_actual": 0.0,
+                "maker_ratio_entry_actual": 0.0,  # 修复：分开统计entry
+                "maker_ratio_exit_actual": 0.0,  # 修复：分开统计exit
+                "effective_spread_bps_p50": 0.0,
+                "effective_spread_bps_p95": 0.0,
                 "by_symbol": {},  # 多品种公平权重：空交易时也包含by_symbol字段
             }
             # P1-4: 即使无交易也保存metrics并推送健康度指标
@@ -417,15 +427,77 @@ class MetricsAggregator:
         # P0修复: 计算成本bps（稳定口径，避免除以接近0的毛利导致发散）
         cost_bps_on_turnover = ((total_fee + total_slippage) / total_turnover * 10000) if total_turnover > 0 else 0.0
         
+        # P0修复: 成本观测指标 - 计算maker/taker实际比例和effective_spread_bps分布
+        # 修复：分开统计entry和exit的maker比例
+        maker_actual_count = 0
+        taker_actual_count = 0
+        maker_entry_count = 0
+        taker_entry_count = 0
+        maker_exit_count = 0
+        taker_exit_count = 0
+        effective_spread_bps_list = []
+        
+        for trade in trades:
+            reason = trade.get("reason", "")
+            # 只统计entry和exit交易
+            if reason in ["entry", "exit", "reverse", "reverse_signal", "stop_loss", "take_profit", "timeout", "rollover_close"]:
+                is_maker = trade.get("is_maker_actual", False)
+                if is_maker:
+                    maker_actual_count += 1
+                else:
+                    taker_actual_count += 1
+                
+                # 分开统计entry和exit
+                if reason == "entry":
+                    if is_maker:
+                        maker_entry_count += 1
+                    else:
+                        taker_entry_count += 1
+                elif reason in ["exit", "reverse", "reverse_signal", "stop_loss", "take_profit", "timeout", "rollover_close"]:
+                    if is_maker:
+                        maker_exit_count += 1
+                    else:
+                        taker_exit_count += 1
+                
+                effective_spread = trade.get("effective_spread_bps")
+                if effective_spread is not None:
+                    effective_spread_bps_list.append(abs(effective_spread))
+        
+        total_maker_taker_count = maker_actual_count + taker_actual_count
+        maker_ratio_actual = maker_actual_count / total_maker_taker_count if total_maker_taker_count > 0 else 0.0
+        taker_ratio_actual = taker_actual_count / total_maker_taker_count if total_maker_taker_count > 0 else 0.0
+        
+        # 分开统计entry和exit的maker比例
+        total_entry_count = maker_entry_count + taker_entry_count
+        total_exit_count = maker_exit_count + taker_exit_count
+        maker_ratio_entry_actual = maker_entry_count / total_entry_count if total_entry_count > 0 else 0.0
+        maker_ratio_exit_actual = maker_exit_count / total_exit_count if total_exit_count > 0 else 0.0
+        
+        # 计算effective_spread_bps的P50/P95分位
+        import statistics
+        effective_spread_bps_p50 = statistics.median(effective_spread_bps_list) if effective_spread_bps_list else 0.0
+        effective_spread_bps_p95 = 0.0
+        if effective_spread_bps_list:
+            sorted_spreads = sorted(effective_spread_bps_list)
+            p95_idx = int(len(sorted_spreads) * 0.95)
+            effective_spread_bps_p95 = sorted_spreads[min(p95_idx, len(sorted_spreads) - 1)]
+        
+        # F系列实验: 计算avg_pnl_per_trade和pnl_net
+        net_pnl = total_pnl - total_fee - total_slippage
+        avg_pnl_per_trade = net_pnl / total_trades if total_trades > 0 else 0.0
+        
         # Build metrics dict
         metrics = {
             "total_trades": total_trades,
             "total_pnl": total_pnl,
+            "pnl_net": net_pnl,  # F系列: 净PnL（total_pnl - fee - slippage）
             "total_fee": total_fee,
             "total_slippage": total_slippage,
             "total_turnover": total_turnover,
             "win_rate": win_rate_days,  # 兼容保留（日口径）
             "win_rate_trades": win_rate_trades,  # P0修复: 新增交易口径胜率（优化打分建议用它）
+            "avg_pnl_per_trade": avg_pnl_per_trade,  # F系列: 平均单笔收益
+            "pnl_per_trade": avg_pnl_per_trade,  # 兼容保留（与avg_pnl_per_trade相同）
             "cost_bps_on_turnover": cost_bps_on_turnover,  # P0修复: 新增成本bps口径
             "risk_reward_ratio": rr,
             "sharpe_ratio": sharpe,
@@ -445,6 +517,13 @@ class MetricsAggregator:
             "fee_tier_distribution": dict(fee_tier_distribution),
             # P1-4: 统一波动字段命名（avg_ret1s_bps作为质量监控指标）
             "avg_ret1s_bps": avg_ret1s_bps,
+            # P0修复: 成本观测指标
+            "maker_ratio_actual": maker_ratio_actual,
+            "taker_ratio_actual": taker_ratio_actual,
+            "maker_ratio_entry_actual": maker_ratio_entry_actual,  # 修复：分开统计entry
+            "maker_ratio_exit_actual": maker_ratio_exit_actual,  # 修复：分开统计exit
+            "effective_spread_bps_p50": effective_spread_bps_p50,
+            "effective_spread_bps_p95": effective_spread_bps_p95,
             # 多品种公平权重：按symbol聚合的指标
             "by_symbol": dict(by_symbol),
         }

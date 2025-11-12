@@ -17,19 +17,25 @@ GROUPS = {
         "name": "严门控+去重提速",
         "config": "runtime/optimizer/group_a_strict_gating.yaml",
         "output_prefix": "group_a",
-        "description": "主打降频：弱信号阈值0.45，去重窗口1800ms，持仓240s"
+        "description": "主打降频：弱信号阈值0.7，去重窗口5000ms，持仓180s"
     },
     "B": {
         "name": "冷却+反向防抖",
         "config": "runtime/optimizer/group_b_cooldown_anti_flip.yaml",
         "output_prefix": "group_b",
-        "description": "主打少反手：flip_rearm_margin=0.35，adaptive_cooldown_k=0.5"
+        "description": "主打少反手：flip_rearm_margin=0.45，adaptive_cooldown_k=0.7"
     },
     "C": {
         "name": "Maker-first成本压降",
         "config": "runtime/optimizer/group_c_maker_first.yaml",
         "output_prefix": "group_c",
-        "description": "主打降成本：maker_fee_ratio=0.5，安静期maker概率0.8"
+        "description": "主打降成本：maker_fee_ratio=0.4，安静期maker概率0.85"
+    },
+    "D": {
+        "name": "A+B+C组合",
+        "config": "runtime/optimizer/group_d_combined.yaml",
+        "output_prefix": "group_d",
+        "description": "一把到位的过线配置：weak_signal_threshold=0.70，flip_rearm_margin=0.45，min_hold_time_sec=240"
     }
 }
 
@@ -72,21 +78,28 @@ def run_backtest(group_key: str, group_info: Dict[str, Any],
     
     # 运行回测
     print(f"执行命令: {' '.join(cmd)}\n")
-    result = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True, encoding="utf-8")
+    result = subprocess.run(
+        cmd, 
+        cwd=project_root, 
+        capture_output=True, 
+        text=True, 
+        encoding="utf-8",
+        errors="replace"
+    )
     
     if result.returncode != 0:
-        print(f"❌ 组 {group_key} 运行失败:")
+        print(f"[ERROR] 组 {group_key} 运行失败:")
         print(result.stderr)
         return None
     
     # 查找结果目录
     backtest_dirs = list(output_dir.glob("backtest_*"))
     if not backtest_dirs:
-        print(f"⚠️  组 {group_key} 未找到结果目录")
+        print(f"[WARN] 组 {group_key} 未找到结果目录")
         return None
     
     result_dir = backtest_dirs[0]
-    print(f"✅ 组 {group_key} 完成，结果目录: {result_dir}")
+    print(f"[OK] 组 {group_key} 完成，结果目录: {result_dir}")
     return result_dir
 
 
@@ -188,7 +201,7 @@ def compare_results(results: Dict[str, Dict[str, Any]]) -> None:
             else:
                 passed = False
             
-            status = "✅" if passed else "❌"
+            status = "[OK]" if passed else "[FAIL]"
             print(f"  {status} {criteria['desc']}: {value:.2f} vs {target:.2f} ({'通过' if passed else '未达标'})")
     
     # 改善对比
@@ -212,18 +225,18 @@ def compare_results(results: Dict[str, Dict[str, Any]]) -> None:
                 # 越低越好
                 change_pct = (baseline_value - current_value) / baseline_value * 100
                 if change_pct > 0:
-                    improvements.append(f"{metric_key}: ⬇️ {change_pct:.1f}%")
+                    improvements.append(f"{metric_key}: DOWN {change_pct:.1f}%")
             else:
                 # 越高越好
                 change_pct = (current_value - baseline_value) / baseline_value * 100
                 if change_pct > 0:
-                    improvements.append(f"{metric_key}: ⬆️ {change_pct:.1f}%")
+                    improvements.append(f"{metric_key}: UP {change_pct:.1f}%")
         
         if improvements:
             for imp in improvements:
                 print(f"  {imp}")
         else:
-            print("  ⚠️  未发现明显改善")
+            print("  [WARN] 未发现明显改善")
 
 
 def main():
@@ -235,7 +248,7 @@ def main():
     parser.add_argument("--date", type=str, default="2025-11-09", help="日期 (YYYY-MM-DD)")
     parser.add_argument("--symbols", type=str, default="BTCUSDT,ETHUSDT", help="交易对（逗号分隔）")
     parser.add_argument("--minutes", type=int, default=60, help="回测时长（分钟）")
-    parser.add_argument("--groups", type=str, default="A,B,C", help="要运行的组（逗号分隔，如A,B,C）")
+    parser.add_argument("--groups", type=str, default="A,B,C,D", help="要运行的组（逗号分隔，如A,B,C,D）")
     
     args = parser.parse_args()
     
@@ -246,7 +259,7 @@ def main():
     results = {}
     for group_key in groups_to_run:
         if group_key not in GROUPS:
-            print(f"⚠️  未知组: {group_key}，跳过")
+            print(f"[WARN] 未知组: {group_key}，跳过")
             continue
         
         group_info = GROUPS[group_key]
@@ -286,9 +299,9 @@ def main():
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(comparison_data, f, indent=2, ensure_ascii=False)
         
-        print(f"\n✅ 对比结果已保存到: {output_file}")
+        print(f"\n[OK] 对比结果已保存到: {output_file}")
     else:
-        print("\n❌ 没有成功运行任何组")
+        print("\n[ERROR] 没有成功运行任何组")
 
 
 if __name__ == "__main__":

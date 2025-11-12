@@ -1,0 +1,30 @@
+{
+  "stage": 2,
+  "description": "F6组：成本稳健性 - 费率/滑点±25%压力",
+  "target": "防止纸面成本改进、真实不稳",
+  "search_space": {
+    "backtest.taker_fee_bps": [1.5, 2.0, 2.5],
+    "backtest.slippage_bps": [0.75, 1.0, 1.25],
+    "backtest.fee_maker_taker.maker_fee_ratio": [0.26, 0.35, 0.44],
+    "note": "F6: 费率/滑点±25%压力测试（基准2.0/1.0/0.35）"
+  },
+  "constraints": {
+    "cost_bps_on_turnover": {
+      "max": 1.85,
+      "description": "cost_bps仍≤1.85"
+    },
+    "top3_stability": {
+      "description": "Top-3方案排序不颠倒"
+    }
+  },
+  "scoring_weights": {
+    "net_pnl": 0.25,
+    "pnl_per_trade": 0.25,
+    "trades_per_hour": 0.15,
+    "trades_per_hour_threshold": 25,
+    "cost_bps_on_turnover": 0.25,
+    "cost_bps_threshold": 1.85,
+    "description": "F6: 重点验证成本稳健性"
+  }
+}
+

@@ -69,7 +69,7 @@ def parse_args():
     # Configuration
     parser.add_argument("--config", type=str, default="./config/backtest.yaml", help="Config file path")
     parser.add_argument("--output", type=str, help="Output directory (overrides config)")
-    parser.add_argument("--sink", type=str, choices=["jsonl", "sqlite", "null"], help="Signal sink type")
+    parser.add_argument("--sink", type=str, choices=["jsonl", "sqlite", "null", "dual"], help="Signal sink type")
     
     # Backtest parameters
     parser.add_argument("--taker-fee-bps", type=float, help="Taker fee (basis points)")
@@ -249,6 +249,13 @@ def main():
     if "components" in config:
         signal_config["components"] = config["components"]
     
+    # TASK-A4: 传递 core 配置和 use_signal_v2 给 ReplayFeeder
+    # 这样 signal/v2 的 core.* 配置才能正确传递到 CoreAlgorithm
+    if "core" in config:
+        signal_config["core"] = config["core"]
+    if "use_signal_v2" in config:
+        signal_config["use_signal_v2"] = config["use_signal_v2"]
+    
     # Handle sink config (can be string or dict)
     sink_config = signal_config.get("sink", "jsonl")
     if isinstance(sink_config, str):
@@ -282,10 +289,12 @@ def main():
     else:
         # 从YAML配置读取（默认True）
         ignore_gating = backtest_config.get("ignore_gating_in_backtest", True)
+    # F3修复: 将CoreAlgorithm实例传递给TradeSimulator（用于退出后冷静期）
     trade_sim = TradeSimulator(
         config=backtest_config,
         output_dir=output_dir,
         ignore_gating_in_backtest=ignore_gating,
+        core_algo=feeder.algo,  # F3: 传递CoreAlgorithm实例
     )
     
     # Process data

@@ -1,0 +1,31 @@
+stage: 2
+description: "F3组：反向防抖 & 连击/冷却联合（进一步降频、抑制亏损翻手）"
+target: "胜率≥45% 且 avg_pnl_per_trade由负转正（>0）"
+search_space:
+  signal.min_consecutive_same_dir: [3, 4, 5]
+  execution.cooldown_ms: [500, 800, 1200]
+  signal.dedupe_ms: [8000, 10000]
+  note: "F3: 阶梯试连击/冷却/去重，抑制亏损翻手"
+
+constraints:
+  trades_per_hour:
+    max: 20
+    description: "频率硬约束 ≤20/h"
+  cost_bps_on_turnover:
+    max: 1.75
+    description: "成本硬约束 ≤1.75 bps"
+
+scoring_weights:
+  pnl_net: 1.0
+  avg_pnl_per_trade: 0.6
+  trades_per_hour: -0.4
+  cost_bps_on_turnover: -0.5
+  win_rate_trades: 0.0
+  description: "STAGE-2: 纳入成本和密度，重点优化PNL和单笔收益"
+
+hard_constraints:
+  avg_pnl_per_trade: ">= 0"
+  pnl_net: ">= 0"
+  trades_per_hour: "<= 20"
+  cost_bps_on_turnover: "<= 1.75"
+

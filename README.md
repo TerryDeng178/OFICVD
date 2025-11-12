@@ -70,14 +70,20 @@ repo/
 │        ├─ __init__.py
 │        └─ core_algo.py                  # ★ CORE_ALGO 信号合成（已集成 StrategyMode，TASK-06）
 │
-├─ mcp/                                   # MCP 服务器（薄壳层）
-│  ├─ data_feed_server/app.py             # 复用 ingestion.harvester
-│  ├─ ofi_feature_server/app.py
-│  ├─ ofi_risk_server/app.py
-│  ├─ broker_gateway_server/app.py
-│  ├─ report_server/app.py
-│  ├─ harvest_server/app.py               # ★ 新增：HARVEST 薄壳
-│  └─ signal_server/app.py                # ★ 新增：CORE_ALGO 薄壳
+├─ mcp/                                   # MCP 服务器（薄壳层，精简为5个核心服务）
+│  ├─ harvest_server/app.py               # ★ HARVEST：采集/对齐/落盘（Raw+Preview/宽表）
+│  ├─ signal_server/app.py                # ★ SIGNAL：信号生成（CoreAlgo薄壳）
+│  ├─ strategy_server/                    # ★ STRATEGY：策略执行（含风控模块）
+│  │  ├─ app.py
+│  │  └─ risk/                            # 风控模块（合并ofi_risk_server逻辑）
+│  ├─ broker_gateway_server/app.py        # ★ BROKER：交易所网关（Testnet/Live）
+│  └─ report_server/app.py                # ★ REPORT：报表生成
+│
+├─ legacy/                                 # 已下线服务（只读，不进入部署链路）
+│  └─ mcp/
+│     ├─ data_feed_server/                 # 功能由harvest_server覆盖
+│     ├─ ofi_feature_server/               # 特征计算在库层，由signal_server调用
+│     └─ ofi_risk_server/                  # 逻辑已合并到strategy_server/risk/
 │
 ├─ orchestrator/
 │  └─ run.py                              # 主控循环（编排 MCP 调用）
@@ -469,37 +475,37 @@ python -m mcp.signal_server.app \
 
 **M3 · 主控编排（Orchestrator）**
 ```bash
-# 基本用法（Windows PowerShell）:
+# 基本用法（Windows PowerShell，5个核心服务）:
 python -m orchestrator.run `
   --config ./config/defaults.yaml `
-  --enable harvest,signal,broker,report `
+  --enable harvest,signal,strategy,broker,report `
   --sink jsonl `
   --minutes 3
 
 # 双 Sink 模式（同时写入 JSONL 和 SQLite）:
 python -m orchestrator.run `
   --config ./config/defaults.yaml `
-  --enable harvest,signal,broker,report `
+  --enable harvest,signal,strategy,broker,report `
   --sink dual `
   --minutes 3
 
 # SQLite 模式:
 python -m orchestrator.run `
   --config ./config/defaults.yaml `
-  --enable harvest,signal,broker,report `
+  --enable harvest,signal,strategy,broker,report `
   --sink sqlite `
   --minutes 3
 
 # Linux/macOS:
 python -m orchestrator.run \
   --config ./config/defaults.yaml \
-  --enable harvest,signal,broker,report \
+  --enable harvest,signal,strategy,broker,report \
   --sink jsonl \
   --minutes 3
 ```
 
 **Orchestrator 说明**:
-- **功能**: 统一编排 HARVEST → SIGNAL → BROKER → REPORT 流程
+- **功能**: 统一编排 HARVEST → SIGNAL → STRATEGY(含Risk) → BROKER → REPORT 流程（5个核心服务）
 - **Sink 支持**: `jsonl`、`sqlite`、`dual`（双 Sink 并行写入）
 - **健康检查**: 每 10 秒检查一次，支持 LIVE/replay 模式区分
 - **优雅重启**: 支持故障注入测试，进程被 kill 后自动重启（12 秒内）

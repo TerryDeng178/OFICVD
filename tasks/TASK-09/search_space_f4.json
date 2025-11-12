@@ -1,0 +1,32 @@
+{
+  "stage": 1,
+  "description": "F4组：场景化阈值（活跃/安静分档）",
+  "target": "win_rate_trades ≥ 35%、avg_pnl_per_trade ≥ 0、pnl_net ≥ 0",
+  "search_space": {
+    "signal.scenario_overrides.A_H.weak_signal_threshold_offset": [0.02],
+    "signal.scenario_overrides.A_H.consistency_min_offset": [0.02],
+    "signal.scenario_overrides.A_H.min_consecutive_offset": [1],
+    "signal.scenario_overrides.Q_H.weak_signal_threshold_offset": [0.02],
+    "signal.scenario_overrides.Q_H.consistency_min_offset": [0.02],
+    "signal.scenario_overrides.Q_H.min_consecutive_offset": [1],
+    "note": "F4: 为A_H/Q_H场景添加偏移，A_L/Q_L使用全局基线。注意：需要在代码中实现scenario_overrides支持"
+  },
+  "constraints": {
+    "trades_per_hour": {
+      "max": 30,
+      "description": "频率软约束 ≤30/h"
+    },
+    "active_scenario_improvement": {
+      "description": "活跃时段胜率/单笔显著提升，且整体频率不反弹"
+    }
+  },
+  "scoring_weights": {
+    "win_rate_trades": 0.40,
+    "pnl_net": 0.30,
+    "avg_pnl_per_trade": 0.20,
+    "trades_per_hour": 0.10,
+    "trades_per_hour_threshold": 30,
+    "cost_bps_on_turnover": 0.0,
+    "description": "F4: 重点优化胜率和PNL，成本权重设为0"
+  }
+}

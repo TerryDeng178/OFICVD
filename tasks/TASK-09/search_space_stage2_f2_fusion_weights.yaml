@@ -1,0 +1,36 @@
+stage: 2
+description: "F2组：融合权重/阈值搜索（提升有利波段命中率）"
+target: "胜率≥45% 且 avg_pnl_per_trade由负转正（>0）"
+search_space:
+  components.fusion.w_ofi: [0.5, 0.6, 0.7]
+  components.fusion.w_cvd: 
+    # 注意：w_cvd会自动计算为1-w_ofi，这里仅用于验证
+    note: "w_cvd = 1 - w_ofi (自动约束)"
+  signal.thresholds.quiet.buy: [0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
+  signal.thresholds.quiet.sell: [-1.5, -1.4, -1.3, -1.2, -1.1, -1.0, -0.9]
+  signal.thresholds.active.buy: [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  signal.thresholds.active.sell: [-1.0, -0.9, -0.8, -0.7, -0.6, -0.5]
+  note: "F2: 搜索融合权重与regime阈值，提升有利波段命中率"
+
+constraints:
+  trades_per_hour:
+    max: 20
+    description: "频率硬约束 ≤20/h"
+  cost_bps_on_turnover:
+    max: 1.75
+    description: "成本硬约束 ≤1.75 bps"
+
+scoring_weights:
+  pnl_net: 1.0
+  avg_pnl_per_trade: 0.6
+  trades_per_hour: -0.4
+  cost_bps_on_turnover: -0.5
+  win_rate_trades: 0.0
+  description: "STAGE-2: 纳入成本和密度，重点优化PNL和单笔收益"
+
+hard_constraints:
+  avg_pnl_per_trade: ">= 0"
+  pnl_net: ">= 0"
+  trades_per_hour: "<= 20"
+  cost_bps_on_turnover: "<= 1.75"
+

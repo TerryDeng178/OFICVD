@@ -1892,7 +1892,14 @@ class SuccessOFICVDHarvester:
                 # 更新内存缓存
                 self.orderbooks[symbol] = orderbook_data
                 
+                # 计算扁平化字段（先计算，供orderbook_buf和对齐器使用）
+                bb = orderbook_data['bids'][0][0] if orderbook_data['bids'] and orderbook_data['bids'][0] else 0.0
+                ba = orderbook_data['asks'][0][0] if orderbook_data['asks'] and orderbook_data['asks'][0] else 0.0
+                mid = (bb + ba) / 2 if (bb > 0 and ba > 0) else 0.0
+                spread_bps = (ba - bb) / mid * 1e4 if mid > 0 else 0.0
+                
                 # 保存订单簿快照到队列（用于时间对齐）
+                # 修复：添加best_bid/best_ask/mid/spread_bps字段，供对齐器直接取用
                 event_ts_ms = int(orderbook_data.get('event_ts_ms', 0))
                 self.orderbook_buf[symbol].append({
                     'ts_ms': event_ts_ms,
@@ -1901,13 +1908,12 @@ class SuccessOFICVDHarvester:
                     'last_id': orderbook_data.get('last_id'),
                     'first_id': orderbook_data.get('first_id'),
                     'prev_last_id': orderbook_data.get('prev_last_id'),
+                    # 新增四个关键字段（供对齐器直接取用）
+                    'best_bid': bb,
+                    'best_ask': ba,
+                    'mid': mid,
+                    'spread_bps': spread_bps,
                 })
-                
-                # 计算扁平化字段
-                bb = orderbook_data['bids'][0][0] if orderbook_data['bids'] and orderbook_data['bids'][0] else 0.0
-                ba = orderbook_data['asks'][0][0] if orderbook_data['asks'] and orderbook_data['asks'][0] else 0.0
-                mid = (bb + ba) / 2 if (bb > 0 and ba > 0) else 0.0
-                spread_bps = (ba - bb) / mid * 1e4 if mid > 0 else 0.0
                 
                 # 提取Top5档位扁平化字段（避免保存时json.loads）
                 bid_levels = [0.0, 0.0] * 5  # [bid1_p, bid1_q, bid2_p, bid2_q, ...]

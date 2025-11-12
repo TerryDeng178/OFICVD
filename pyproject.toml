@@ -27,6 +27,8 @@ dependencies = [
     "pandas>=2.1.0",
     "pyarrow>=14.0.0",
     "PyYAML>=6.0.0",
+    "prometheus-client>=0.19.0",  # Prometheus指标支持（可选，未安装时使用降级实现）
+    "python-binance>=1.0.19",  # Binance官方SDK，用于期货交易（解决签名问题）
 ]
 
 [project.optional-dependencies]
@@ -64,4 +66,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 

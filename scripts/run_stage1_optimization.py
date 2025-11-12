@@ -38,10 +38,10 @@ def check_dual_sink_parity_prerequisite(
         date: 回测日期
         symbols: 交易对（逗号分隔）
         minutes: 测试时长（分钟，默认2分钟）
-        threshold: 差异阈值（默认0.2%）
+        threshold: 差异阈值（单位：百分比数值，0.2表示0.2%，即20bp）
     
     Returns:
-        True表示通过，False表示失败
+        True表示通过，False表示失败（Fail-Closed策略）
     """
     logger.info("=" * 80)
     logger.info("TASK-07B: 双Sink等价性前置检查")
@@ -49,21 +49,27 @@ def check_dual_sink_parity_prerequisite(
     
     try:
         # 运行一个短时间的双Sink测试
+        # F系列实验修复: replay_harness不支持dual sink，需要分别运行jsonl和sqlite
         logger.info(f"运行双Sink测试（{minutes}分钟）...")
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "orchestrator.run",
-                "--config",
-                str(config_path),
-                "--enable",
-                "signal,report",
-                "--sink",
-                "dual",
-                "--minutes",
-                str(minutes),
-            ],
+        
+        # 运行JSONL sink
+        cmd_jsonl = [
+            sys.executable,
+            "scripts/replay_harness.py",
+            "--config",
+            str(config_path),
+            "--input", input_dir or "deploy/data/ofi_cvd",
+            "--date", date or "2025-11-10",
+            "--symbols", symbols or "BTCUSDT",
+            "--kinds", "features",
+            "--minutes",
+            str(minutes),
+            "--sink",
+            "jsonl",
+        ]
+        
+        result_jsonl = subprocess.run(
+            cmd_jsonl,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -71,15 +77,67 @@ def check_dual_sink_parity_prerequisite(
             env=os.environ.copy(),
         )
         
-        if result.returncode != 0:
-            logger.error(f"双Sink前置测试失败，退出码: {result.returncode}")
-            logger.error(f"错误信息: {result.stderr[:500]}")
+        if result_jsonl.returncode != 0:
+            logger.error(f"JSONL Sink测试失败，退出码: {result_jsonl.returncode}")
+            logger.error(f"错误信息: {result_jsonl.stderr[:500]}")
             return False
         
-        # 获取RUN_ID（从环境变量或日志中提取）
+        # 运行SQLite sink
+        cmd_sqlite = [
+            sys.executable,
+            "scripts/replay_harness.py",
+            "--config",
+            str(config_path),
+            "--input", input_dir or "deploy/data/ofi_cvd",
+            "--date", date or "2025-11-10",
+            "--symbols", symbols or "BTCUSDT",
+            "--kinds", "features",
+            "--minutes",
+            str(minutes),
+            "--sink",
+            "sqlite",
+        ]
+        
+        result_sqlite = subprocess.run(
+            cmd_sqlite,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=os.environ.copy(),
+        )
+        
+        if result_sqlite.returncode != 0:
+            logger.error(f"SQLite Sink测试失败，退出码: {result_sqlite.returncode}")
+            logger.error(f"错误信息: {result_sqlite.stderr[:500]}")
+            return False
+        
+        # 使用SQLite的RUN_ID（两个sink应该使用相同的RUN_ID）
+        result = result_sqlite
+        
+        # 获取RUN_ID（优先从输出目录读取run_manifest.json，其次环境变量，最后日志）
         run_id = os.getenv("RUN_ID", "")
         if not run_id:
-            # 尝试从日志中提取RUN_ID
+            # P1修复: 尝试从输出目录读取run_manifest.json（更健壮）
+            # 查找最新的backtest目录
+            output_base = Path("runtime")
+            if output_base.exists():
+                backtest_dirs = sorted(output_base.glob("**/backtest_*"), key=lambda p: p.stat().st_mtime, reverse=True)
+                for backtest_dir in backtest_dirs[:3]:  # 只检查最新的3个
+                    manifest_file = backtest_dir / "run_manifest.json"
+                    if manifest_file.exists():
+                        try:
+                            with open(manifest_file, "r", encoding="utf-8") as f:
+                                manifest = json.load(f)
+                                run_id = manifest.get("run_id", "")
+                                if run_id:
+                                    logger.info(f"从 {manifest_file} 读取RUN_ID: {run_id}")
+                                    break
+                        except Exception:
+                            pass
+        
+        if not run_id:
+            # 最后尝试从日志中提取RUN_ID
             for line in result.stdout.split("\n"):
                 if "RUN_ID" in line or "run_id" in line:
                     # 简单提取，可能需要更复杂的解析
@@ -92,16 +150,15 @@ def check_dual_sink_parity_prerequisite(
                         break
         
         if not run_id:
-            logger.warning("无法获取RUN_ID，跳过等价性验证")
-            logger.info("双Sink前置测试完成（未验证等价性）")
-            return True  # 测试运行成功，但无法验证等价性
+            logger.error("无法获取RUN_ID，无法完成双Sink等价性验证（Fail-Closed）")
+            return False  # P1修复: fail-closed，无法验证等价性则拒绝继续
         
         # 运行等价性验证
-        logger.info(f"验证双Sink等价性（RUN_ID={run_id}，阈值={threshold}%）...")
+        logger.info(f"验证双Sink等价性（RUN_ID={run_id}，阈值={threshold}%，即{threshold*10}bp）...")
         verify_script = Path(__file__).parent / "verify_sink_parity.py"
         if not verify_script.exists():
-            logger.warning(f"验证脚本不存在: {verify_script}，跳过等价性验证")
-            return True
+            logger.error(f"验证脚本不存在: {verify_script}（Fail-Closed）")
+            return False  # P1修复: fail-closed，验证脚本不存在则拒绝继续
         
         verify_result = subprocess.run(
             [
@@ -142,7 +199,7 @@ def run_dual_sink_regression_check(
     
     Args:
         run_id: 优化批次的RUN_ID
-        threshold: 差异阈值（默认0.2%）
+        threshold: 差异阈值（单位：百分比数值，0.2表示0.2%，即20bp）
     
     Returns:
         True表示通过，False表示失败
@@ -158,7 +215,7 @@ def run_dual_sink_regression_check(
             logger.warning(f"验证脚本不存在: {verify_script}，跳过回归检查")
             return True
         
-        logger.info(f"运行双Sink等价性回归检查（阈值={threshold}%）...")
+        logger.info(f"运行双Sink等价性回归检查（阈值={threshold}%，即{threshold*10}bp）...")
         verify_result = subprocess.run(
             [
                 sys.executable,
@@ -321,6 +378,13 @@ def main():
     
     combos = _combo_count(search_space)
     
+    # F系列实验修复: 允许单组合（如F4只有1个固定配置）
+    if combos == 1:
+        logger.warning(f"搜索空间组合数=1（可能是固定配置，如F4），继续执行")
+    elif combos < 1:
+        logger.error("搜索空间组合数<1，配置错误")
+        return 1
+    
     # P0修复: 预览前三个候选组合（仅打印键值），用于人工核对
     try:
         from itertools import product, islice
@@ -359,8 +423,8 @@ def main():
         logger.warning("跳过双Sink等价性前置检查（不推荐）")
     
     if combos <= 1:
-        logger.error("搜索空间组合数=1。请检查：1) JSON 是否含 'search_space' 顶层；2) 各键是否为列表且至少2个取值；3) dot-path 是否匹配 backtest.yaml")
-        return 1
+        # F系列实验修复: 允许单组合（如F4只有1个固定配置）
+        logger.warning("搜索空间组合数=1（可能是固定配置，如F4），继续执行")
     
     # 创建输出目录
     if args.output:

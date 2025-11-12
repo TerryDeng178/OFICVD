@@ -42,7 +42,8 @@ class ParameterOptimizer:
         if not self.base_config_path.exists():
             raise ValueError(f"配置文件不存在: {self.base_config_path}")
         
-        self.search_space = search_space
+        # 过滤掉非参数字段（note, description等）
+        self.search_space = {k: v for k, v in search_space.items() if k not in ("note", "description", "target")}
         self.output_dir = Path(output_dir) if output_dir else Path("runtime/optimizer")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -156,6 +157,26 @@ class ParameterOptimizer:
                     self._set_nested_value(trial_config, name, value)
                     trial_params[name] = value
                 
+                # F2修复: 确保w_ofi + w_cvd = 1.0约束
+                # 如果search_space中包含w_ofi，自动调整w_cvd使其和为1.0
+                if "components.fusion.w_ofi" in trial_params:
+                    w_ofi = trial_params["components.fusion.w_ofi"]
+                    # 获取当前w_cvd（可能来自trial_params或基线配置）
+                    w_cvd = trial_params.get("components.fusion.w_cvd")
+                    if w_cvd is None:
+                        w_cvd = self._get_nested_value(trial_config, "components.fusion.w_cvd")
+                    
+                    # 如果w_cvd存在但w_ofi + w_cvd != 1.0，调整w_cvd
+                    # 如果w_cvd不存在，自动设置为1-w_ofi
+                    if w_cvd is None or abs(w_ofi + w_cvd - 1.0) > 1e-6:
+                        w_cvd_adjusted = 1.0 - w_ofi
+                        self._set_nested_value(trial_config, "components.fusion.w_cvd", w_cvd_adjusted)
+                        trial_params["components.fusion.w_cvd"] = w_cvd_adjusted
+                        if w_cvd is not None:
+                            logger.debug(f"[ParameterOptimizer] F2约束: 调整w_cvd {w_cvd} -> {w_cvd_adjusted} (w_ofi={w_ofi})")
+                        else:
+                            logger.debug(f"[ParameterOptimizer] F2约束: 自动设置w_cvd={w_cvd_adjusted} (w_ofi={w_ofi})")
+                
                 trials.append({
                     "config": trial_config,
                     "params": trial_params,
@@ -175,6 +196,26 @@ class ParameterOptimizer:
                     self._set_nested_value(trial_config, name, value)
                     trial_params[name] = value
                 
+                # F2修复: 确保w_ofi + w_cvd = 1.0约束
+                # 如果search_space中包含w_ofi，自动调整w_cvd使其和为1.0
+                if "components.fusion.w_ofi" in trial_params:
+                    w_ofi = trial_params["components.fusion.w_ofi"]
+                    # 获取当前w_cvd（可能来自trial_params或基线配置）
+                    w_cvd = trial_params.get("components.fusion.w_cvd")
+                    if w_cvd is None:
+                        w_cvd = self._get_nested_value(trial_config, "components.fusion.w_cvd")
+                    
+                    # 如果w_cvd存在但w_ofi + w_cvd != 1.0，调整w_cvd
+                    # 如果w_cvd不存在，自动设置为1-w_ofi
+                    if w_cvd is None or abs(w_ofi + w_cvd - 1.0) > 1e-6:
+                        w_cvd_adjusted = 1.0 - w_ofi
+                        self._set_nested_value(trial_config, "components.fusion.w_cvd", w_cvd_adjusted)
+                        trial_params["components.fusion.w_cvd"] = w_cvd_adjusted
+                        if w_cvd is not None:
+                            logger.debug(f"[ParameterOptimizer] F2约束: 调整w_cvd {w_cvd} -> {w_cvd_adjusted} (w_ofi={w_ofi})")
+                        else:
+                            logger.debug(f"[ParameterOptimizer] F2约束: 自动设置w_cvd={w_cvd_adjusted} (w_ofi={w_ofi})")
+                
                 trials.append({
                     "config": trial_config,
                     "params": trial_params,
@@ -189,6 +230,7 @@ class ParameterOptimizer:
         trial_id: int,
         backtest_args: Dict[str, Any],
         val_dates: Optional[List[str]] = None,  # Walk-forward验证：验证日期列表
+        multi_window_dates: Optional[List[str]] = None,  # P1修复: 多窗口交叉验证：可用日期列表
     ) -> Dict[str, Any]:
         """运行单个试验"""
         logger.info(f"[ParameterOptimizer] 运行试验 {trial_id}...")
@@ -400,6 +442,94 @@ class ParameterOptimizer:
         
         return result
     
+    def _run_single_window_trial(
+        self,
+        trial_config: Dict[str, Any],
+        trial_id: int,
+        window_backtest_args: Dict[str, Any],
+        window_idx: int,
+    ) -> Dict[str, Any]:
+        """P1修复: 运行单个窗口的回测（用于多窗口交叉验证）
+        
+        Args:
+            trial_config: 试验配置
+            trial_id: 试验ID
+            window_backtest_args: 窗口回测参数（包含date和minutes）
+            window_idx: 窗口索引
+        
+        Returns:
+            窗口回测结果（简化版，只包含success和metrics）
+        """
+        # 创建临时输出目录
+        window_output_dir = self.output_dir / f"trial_{trial_id}_window_{window_idx}"
+        window_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 保存试验配置
+        trial_config_file = window_output_dir / "config.yaml"
+        self._save_config(trial_config, trial_config_file)
+        
+        # 构建回测命令
+        if self.runner == "replay_harness":
+            cmd = [
+                sys.executable,
+                "scripts/replay_harness.py",
+                "--input", str(window_backtest_args.get("input", "deploy/data/ofi_cvd")),
+                "--date", str(window_backtest_args.get("date", "2025-11-09")),
+                "--symbols", ",".join(window_backtest_args.get("symbols", ["BTCUSDT"])),
+                "--kinds", "features",
+                "--config", str(trial_config_file),
+                "--output", str(window_output_dir),
+            ]
+            if window_backtest_args.get("minutes"):
+                cmd.extend(["--minutes", str(window_backtest_args["minutes"])])
+            sink_type = window_backtest_args.get("sink", "sqlite")
+            cmd.extend(["--sink", sink_type])
+        else:
+            logger.warning(f"  [多窗口交叉验证] Runner {self.runner} 不支持窗口回测")
+            return {"success": False, "error": f"Runner {self.runner} not supported"}
+        
+        # 运行回测
+        env = os.environ.copy()
+        backtest_config = trial_config.get("backtest", {})
+        rollover_tz = backtest_config.get("rollover_timezone", "UTC")
+        rollover_hour = backtest_config.get("rollover_hour", 0)
+        env["ROLLOVER_TZ"] = str(rollover_tz)
+        env["ROLLOVER_HOUR"] = str(rollover_hour)
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=300,  # 5分钟超时（窗口回测应该很快）
+        )
+        
+        if result.returncode != 0:
+            logger.debug(f"  [多窗口交叉验证] 窗口 {window_idx} 回测失败: {result.stderr[:200]}")
+            return {"success": False, "error": result.stderr[:200] if result.stderr else "Unknown error"}
+        
+        # 加载结果
+        subdirs = list(window_output_dir.glob("backtest_*"))
+        if not subdirs:
+            return {"success": False, "error": "No result directory found"}
+        
+        result_dir = subdirs[0]
+        metrics_file = result_dir / "metrics.json"
+        
+        if not metrics_file.exists():
+            return {"success": False, "error": "No metrics.json found"}
+        
+        with open(metrics_file, "r", encoding="utf-8") as f:
+            metrics = json.load(f)
+        
+        return {
+            "success": True,
+            "metrics": metrics,
+            "output_dir": str(result_dir),
+        }
+    
     def _run_validation_trial(
         self,
         trial_config: Dict[str, Any],
@@ -584,6 +714,10 @@ class ParameterOptimizer:
         walk_forward_dates: Optional[List[str]] = None,  # Walk-forward验证：可用日期列表
         train_ratio: float = 0.5,  # Walk-forward验证：训练集比例
         walk_forward_step: int = 1,  # Walk-forward验证：走步大小
+        multi_window_dates: Optional[List[str]] = None,  # P1修复: 多窗口交叉验证：可用日期列表
+        use_successive_halving: bool = False,  # P1修复: 是否使用Successive Halving
+        sh_eta: int = 3,  # P1修复: Successive Halving的eta参数（淘汰比例）
+        sh_min_budget: int = 1,  # P1修复: Successive Halving的最小预算（分钟数）
     ) -> List[Dict[str, Any]]:
         """执行参数优化
         
@@ -591,6 +725,12 @@ class ParameterOptimizer:
         - max_workers: 并行worker数（默认1，串行）
         - early_stop_rounds: 早停轮数（随机搜索时，N轮无提升则停止）
         - resume: 是否断点续跑（读取已有trial_results.json）
+        
+        P1修复: 多窗口交叉验证 + Successive Halving
+        - multi_window_dates: 多窗口交叉验证的日期列表（≥3个时间片）
+        - use_successive_halving: 是否使用Successive Halving逐级淘汰
+        - sh_eta: Successive Halving的eta参数（淘汰比例，默认3）
+        - sh_min_budget: Successive Halving的最小预算（分钟数，默认1）
         """
         logger.info("=" * 80)
         logger.info("参数优化")
@@ -629,6 +769,19 @@ class ParameterOptimizer:
             return existing_results
         
         logger.info(f"[ParameterOptimizer] 待运行trial数: {len(pending_trials)}/{len(trials)}")
+        
+        # P1修复: 多窗口交叉验证
+        if multi_window_dates and len(multi_window_dates) >= 3:
+            logger.info(f"[ParameterOptimizer] 启用多窗口交叉验证: {len(multi_window_dates)} 个时间片")
+        elif multi_window_dates:
+            logger.warning(f"[ParameterOptimizer] 多窗口交叉验证需要≥3个时间片，当前只有{len(multi_window_dates)}个，将禁用")
+            multi_window_dates = None
+        
+        # P1修复: Successive Halving
+        if use_successive_halving:
+            logger.info(f"[ParameterOptimizer] 启用Successive Halving (eta={sh_eta}, min_budget={sh_min_budget}分钟)")
+            if method != "random":
+                logger.warning(f"[ParameterOptimizer] Successive Halving建议与random搜索配合使用")
         
         # Walk-forward验证：如果提供了日期列表，生成折叠
         walk_forward_folds = None
@@ -734,44 +887,64 @@ class ParameterOptimizer:
             best_score = -1e9
             stall = 0
             
-            for trial_id, trial in pending_trials:
-                # Walk-forward验证：传递验证日期
-                result = self.run_trial(trial["config"], trial_id, backtest_args, val_dates_for_trials)
-                result["params"] = trial["params"]
-                results.append(result)
-                
-                # 计算并保存score
-                if result.get("success"):
-                    m = result.get("metrics", {})
-                    tp = m.get("total_pnl", 0)
-                    tf = m.get("total_fee", 0)
-                    ts = m.get("total_slippage", 0)
-                    np = tp - tf - ts
-                    # 多品种公平权重：传入trial_result
-                    result["score"] = self._calculate_score(m, np, self.scoring_weights, trial_result=result)
-                
-                # B.1: 增量保存
-                self.trial_results = results
-                self._save_results()
-                
-                # B.1: 早停检查（仅随机搜索）
-                if result.get("success") and method == "random" and early_stop_rounds:
-                    m = result.get("metrics", {})
-                    tp = m.get("total_pnl", 0)
-                    tf = m.get("total_fee", 0)
-                    ts = m.get("total_slippage", 0)
-                    np = tp - tf - ts
-                    # 多品种公平权重：传入trial_result
-                    s = self._calculate_score(m, np, self.scoring_weights, trial_result=result)
-                    if s > best_score:
-                        best_score = s
-                        stall = 0
-                    else:
-                        stall += 1
+            # P1修复: Successive Halving逐级淘汰
+            if use_successive_halving and method == "random":
+                sh_results = self._run_successive_halving(
+                    pending_trials,
+                    backtest_args,
+                    val_dates_for_trials,
+                    multi_window_dates,
+                    sh_eta,
+                    sh_min_budget,
+                )
+                results.extend(sh_results)
+            else:
+                # 标准运行流程
+                for trial_id, trial in pending_trials:
+                    # Walk-forward验证：传递验证日期
+                    # P1修复: 多窗口交叉验证：传递multi_window_dates
+                    result = self.run_trial(
+                        trial["config"],
+                        trial_id,
+                        backtest_args,
+                        val_dates_for_trials,
+                        multi_window_dates,  # P1修复: 传递多窗口日期
+                    )
+                    result["params"] = trial["params"]
+                    results.append(result)
                     
-                    if stall >= early_stop_rounds:
-                        logger.info(f"[ParameterOptimizer] 早停触发: {early_stop_rounds}轮无提升")
-                        break
+                    # 计算并保存score
+                    if result.get("success"):
+                        m = result.get("metrics", {})
+                        tp = m.get("total_pnl", 0)
+                        tf = m.get("total_fee", 0)
+                        ts = m.get("total_slippage", 0)
+                        np = tp - tf - ts
+                        # 多品种公平权重：传入trial_result
+                        result["score"] = self._calculate_score(m, np, self.scoring_weights, trial_result=result)
+                    
+                    # B.1: 增量保存
+                    self.trial_results = results
+                    self._save_results()
+                    
+                    # B.1: 早停检查（仅随机搜索）
+                    if result.get("success") and method == "random" and early_stop_rounds:
+                        m = result.get("metrics", {})
+                        tp = m.get("total_pnl", 0)
+                        tf = m.get("total_fee", 0)
+                        ts = m.get("total_slippage", 0)
+                        np = tp - tf - ts
+                        # 多品种公平权重：传入trial_result
+                        s = self._calculate_score(m, np, self.scoring_weights, trial_result=result)
+                        if s > best_score:
+                            best_score = s
+                            stall = 0
+                        else:
+                            stall += 1
+                        
+                        if stall >= early_stop_rounds:
+                            logger.info(f"[ParameterOptimizer] 早停触发: {early_stop_rounds}轮无提升")
+                            break  # 跳出for循环
         
         self.trial_results = results
         
@@ -786,6 +959,96 @@ class ParameterOptimizer:
         self._print_recommendations()
         
         return results
+    
+    def _run_successive_halving(
+        self,
+        pending_trials: List[tuple],
+        backtest_args: Dict[str, Any],
+        val_dates: Optional[List[str]],
+        multi_window_dates: Optional[List[str]],
+        eta: int = 3,
+        min_budget: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """P1修复: Successive Halving逐级淘汰
+        
+        Args:
+            pending_trials: 待运行的trial列表
+            backtest_args: 回测参数
+            val_dates: 验证日期列表
+            multi_window_dates: 多窗口日期列表
+            eta: 淘汰比例（每轮保留1/eta）
+            min_budget: 最小预算（分钟数）
+        
+        Returns:
+            最终结果列表
+        """
+        logger.info(f"[Successive Halving] 开始逐级淘汰 (eta={eta}, min_budget={min_budget}分钟)")
+        
+        # 计算预算级别（从min_budget开始，逐步增加）
+        original_minutes = backtest_args.get("minutes")
+        if original_minutes:
+            max_budget = original_minutes
+        else:
+            max_budget = 60  # 默认60分钟
+        
+        # 计算预算级别数量
+        budget_levels = []
+        budget = min_budget
+        while budget <= max_budget:
+            budget_levels.append(budget)
+            budget = int(budget * eta)
+        
+        logger.info(f"[Successive Halving] 预算级别: {budget_levels}")
+        
+        # 当前保留的trial
+        current_trials = list(pending_trials)
+        all_results = []
+        
+        # 逐级运行
+        for level_idx, budget_minutes in enumerate(budget_levels):
+            logger.info(f"[Successive Halving] 级别 {level_idx+1}/{len(budget_levels)}: 预算={budget_minutes}分钟, trial数={len(current_trials)}")
+            
+            # 运行当前级别的trial
+            level_results = []
+            level_backtest_args = backtest_args.copy()
+            level_backtest_args["minutes"] = budget_minutes
+            
+            for trial_id, trial in current_trials:
+                result = self.run_trial(
+                    trial["config"],
+                    trial_id,
+                    level_backtest_args,
+                    val_dates,
+                    multi_window_dates,
+                )
+                result["params"] = trial["params"]
+                result["sh_level"] = level_idx + 1
+                result["sh_budget"] = budget_minutes
+                level_results.append((trial_id, trial, result))
+                all_results.append(result)
+            
+            # 如果不是最后一级，进行淘汰
+            if level_idx < len(budget_levels) - 1:
+                # 计算每个trial的评分
+                for trial_id, trial, result in level_results:
+                    if result.get("success"):
+                        m = result.get("metrics", {})
+                        tp = m.get("total_pnl", 0)
+                        tf = m.get("total_fee", 0)
+                        ts = m.get("total_slippage", 0)
+                        np = tp - tf - ts
+                        result["score"] = self._calculate_score(m, np, self.scoring_weights, trial_result=result)
+                
+                # 按评分排序，保留前1/eta
+                level_results.sort(key=lambda x: x[2].get("score", -1e9), reverse=True)
+                keep_count = max(1, len(level_results) // eta)
+                current_trials = [(tid, t) for tid, t, _ in level_results[:keep_count]]
+                
+                logger.info(f"[Successive Halving] 级别 {level_idx+1} 完成: 保留 {keep_count}/{len(level_results)} 个trial")
+            else:
+                logger.info(f"[Successive Halving] 最后级别完成: 所有 {len(level_results)} 个trial运行完成")
+        
+        return all_results
     
     def _validate_multi_symbol_consistency(self, backtest_args: Dict[str, Any]) -> None:
         """多品种公平权重：验证口径一致性
@@ -823,12 +1086,20 @@ class ParameterOptimizer:
         else:
             logger.info(f"[ParameterOptimizer] 多品种优化: ignore_gating_in_backtest={ignore_gating}（统一门控开关）")
     
-    def _run_trial_wrapper(self, trial_config: Dict[str, Any], trial_id: int, backtest_args: Dict[str, Any], val_dates: Optional[List[str]] = None) -> Dict[str, Any]:
+    def _run_trial_wrapper(
+        self,
+        trial_config: Dict[str, Any],
+        trial_id: int,
+        backtest_args: Dict[str, Any],
+        val_dates: Optional[List[str]] = None,
+        multi_window_dates: Optional[List[str]] = None,  # P1修复: 多窗口交叉验证
+    ) -> Dict[str, Any]:
         """B.1: Trial运行包装器（用于ProcessPoolExecutor）
         
         Walk-forward验证：支持传递验证日期
+        P1修复: 多窗口交叉验证：支持传递多窗口日期
         """
-        return self.run_trial(trial_config, trial_id, backtest_args, val_dates)
+        return self.run_trial(trial_config, trial_id, backtest_args, val_dates, multi_window_dates)
     
     def _save_results(self):
         """保存试验结果
@@ -1400,8 +1671,15 @@ class ParameterOptimizer:
         
         # 计算各项指标的rank_score
         net_pnl_score = rank_score(net_pnl, net_pnls)
+        # F系列实验: 支持pnl_net权重（等同于net_pnl）
+        pnl_net_score = net_pnl_score if "pnl_net" in scoring_weights else 0.0
+        
         # P0修复: 使用交易口径胜率（win_rate_trades）替代日口径（win_rate）
-        win_rate_score = rank_score(metrics.get("win_rate_trades", metrics.get("win_rate", 0)), win_rates)
+        # F系列实验: 支持win_rate_trades权重
+        win_rate_trades_value = metrics.get("win_rate_trades", metrics.get("win_rate", 0))
+        win_rate_score = rank_score(win_rate_trades_value, win_rates)
+        win_rate_trades_score = win_rate_score if "win_rate_trades" in scoring_weights else 0.0
+        
         cost_ratio_score = rank_score(cost_ratio, cost_ratios)
         max_drawdown_score = rank_score(abs(metrics.get("max_drawdown", 0)), max_drawdowns)
         
@@ -1421,19 +1699,38 @@ class ParameterOptimizer:
         
         # 计算pnl_per_trade的rank_score（如果权重中包含）
         pnl_per_trade_score = 0.0
-        if "pnl_per_trade" in scoring_weights:
-            pnl_per_trade = net_pnl / total_trades if total_trades > 0 else 0
-            pnl_per_trades = [
-                (r.get("metrics", {}).get("total_pnl", 0) - 
-                 r.get("metrics", {}).get("total_fee", 0) - 
-                 r.get("metrics", {}).get("total_slippage", 0)) / 
-                max(1, r.get("metrics", {}).get("total_trades", 1))
-                for r in successful_results
-            ]
-            if pnl_per_trades:
-                pnl_per_trade_score = rank_score(pnl_per_trade, pnl_per_trades)
+        if "pnl_per_trade" in scoring_weights or "avg_pnl_per_trade" in scoring_weights:
+            # 优先使用metrics中的avg_pnl_per_trade，如果没有则计算
+            avg_pnl_per_trade = metrics.get("avg_pnl_per_trade")
+            if avg_pnl_per_trade is None:
+                avg_pnl_per_trade = net_pnl / total_trades if total_trades > 0 else 0
+            
+            avg_pnl_per_trades = []
+            for r in successful_results:
+                m = r.get("metrics", {})
+                r_avg_pnl = m.get("avg_pnl_per_trade")
+                if r_avg_pnl is None:
+                    r_tp = m.get("total_pnl", 0)
+                    r_tf = m.get("total_fee", 0)
+                    r_ts = m.get("total_slippage", 0)
+                    r_net = r_tp - r_tf - r_ts
+                    r_trades = m.get("total_trades", 1)
+                    r_avg_pnl = r_net / r_trades if r_trades > 0 else 0
+                avg_pnl_per_trades.append(r_avg_pnl)
+            
+            if avg_pnl_per_trades:
+                pnl_per_trade_score = rank_score(avg_pnl_per_trade, avg_pnl_per_trades)
+        
+        # 计算pnl_net的rank_score（如果权重中包含）
+        pnl_net_score = 0.0
+        if "pnl_net" in scoring_weights:
+            # pnl_net就是net_pnl（total_pnl - fee - slippage）
+            pnl_nets = net_pnls  # 已经收集了所有net_pnl
+            if pnl_nets:
+                pnl_net_score = rank_score(net_pnl, pnl_nets)
         
         # 计算trades_per_hour的rank_score（如果权重中包含）
+        # P1修复: 阶梯惩罚（线性→二次）
         trades_per_hour_score = 0.0
         if "trades_per_hour" in scoring_weights:
             trades_per_hour = total_trades / 24.0 if total_trades > 0 else 0  # 假设24小时回测
@@ -1444,11 +1741,22 @@ class ParameterOptimizer:
             if trades_per_hours:
                 # STAGE-2优化: 惩罚交易频率过高（目标≤基线的20%）
                 trades_per_hour_score = rank_score(trades_per_hour, trades_per_hours)
-                # 如果交易频率过高，额外惩罚
-                if trades_per_hour > 50:  # 假设基线约250笔/小时，20%为50
-                    trades_per_hour_score = -0.3  # 惩罚
+                # P1修复: 阶梯惩罚（阈值之上线性→二次）
+                trades_per_hour_threshold = scoring_weights.get("trades_per_hour_threshold", 50)  # 默认阈值50
+                if trades_per_hour > trades_per_hour_threshold:
+                    # 线性惩罚段
+                    excess = trades_per_hour - trades_per_hour_threshold
+                    linear_penalty = -0.01 * excess  # 每超过1笔/小时，扣0.01分
+                    # 二次惩罚段（超过阈值的2倍）
+                    if trades_per_hour > trades_per_hour_threshold * 2:
+                        excess2 = trades_per_hour - trades_per_hour_threshold * 2
+                        quadratic_penalty = -0.02 * (excess2 ** 2)  # 二次惩罚
+                        trades_per_hour_score += linear_penalty + quadratic_penalty
+                    else:
+                        trades_per_hour_score += linear_penalty
         
         # STAGE-2优化: 计算cost_bps_on_turnover的rank_score（如果权重中包含）
+        # P1修复: 成本bps硬惩罚（阶梯惩罚）
         cost_bps_score = 0.0
         if "cost_bps_on_turnover" in scoring_weights:
             cost_bps_on_turnover = metrics.get("cost_bps_on_turnover", 0)
@@ -1459,20 +1767,78 @@ class ParameterOptimizer:
             if cost_bps_list:
                 # 成本bps越低越好，所以使用反向rank_score
                 cost_bps_score = rank_score(-cost_bps_on_turnover, [-cb for cb in cost_bps_list])
-                # 如果成本bps过高（>1.75bps），额外惩罚
-                if cost_bps_on_turnover > 1.75:
-                    cost_bps_score = -0.2  # 惩罚
+                # P1修复: 成本bps硬惩罚（阶梯惩罚）
+                cost_bps_threshold = scoring_weights.get("cost_bps_threshold", 1.75)  # 默认阈值1.75bps
+                if cost_bps_on_turnover > cost_bps_threshold:
+                    # 线性惩罚段
+                    excess = cost_bps_on_turnover - cost_bps_threshold
+                    linear_penalty = -0.1 * excess  # 每超过0.1bps，扣0.1分
+                    # 二次惩罚段（超过阈值的1.5倍）
+                    if cost_bps_on_turnover > cost_bps_threshold * 1.5:
+                        excess2 = cost_bps_on_turnover - cost_bps_threshold * 1.5
+                        quadratic_penalty = -0.2 * (excess2 ** 2)  # 二次惩罚
+                        cost_bps_score += linear_penalty + quadratic_penalty
+                    else:
+                        cost_bps_score += linear_penalty
+        
+        # P1修复: 添加taker_ratio和maker_ratio评分（如果权重中包含）
+        taker_ratio_score = 0.0
+        if "taker_ratio" in scoring_weights:
+            # 尝试从metrics或scenario_breakdown中获取taker_ratio
+            taker_ratio = metrics.get("taker_ratio", 0)
+            if taker_ratio == 0:
+                # 尝试从scenario_breakdown计算
+                scenario_breakdown = metrics.get("scenario_breakdown", {})
+                total_turnover = sum(s.get("turnover", 0) for s in scenario_breakdown.values())
+                taker_turnover = sum(
+                    s.get("turnover", 0) for s in scenario_breakdown.values()
+                    if s.get("scenario", "").endswith("_T")  # Taker场景
+                )
+                taker_ratio = taker_turnover / total_turnover if total_turnover > 0 else 0
+            
+            # taker_ratio越低越好（maker优先），使用反向rank_score
+            taker_ratios = [
+                r.get("metrics", {}).get("taker_ratio", 0)
+                for r in successful_results
+            ]
+            if taker_ratios:
+                taker_ratio_score = rank_score(-taker_ratio, [-tr for tr in taker_ratios])
+                # 硬惩罚：taker_ratio过高（>0.5表示超过50%是taker）
+                if taker_ratio > 0.5:
+                    taker_ratio_score -= 0.3  # 强惩罚
+        
+        maker_ratio_score = 0.0
+        if "maker_ratio" in scoring_weights:
+            maker_ratio = metrics.get("maker_ratio", 0)
+            if maker_ratio == 0:
+                # 尝试从taker_ratio计算
+                taker_ratio = metrics.get("taker_ratio", 0)
+                maker_ratio = 1.0 - taker_ratio
+            
+            # maker_ratio越高越好，使用正向rank_score
+            maker_ratios = [
+                r.get("metrics", {}).get("maker_ratio", 0)
+                for r in successful_results
+            ]
+            if maker_ratios:
+                maker_ratio_score = rank_score(maker_ratio, maker_ratios)
         
         # 加权求和
+        # F系列实验: 支持win_rate_trades、avg_pnl_per_trade、pnl_net权重
         score = (
             scoring_weights.get("net_pnl", 1.0) * net_pnl_score +
-            scoring_weights.get("win_rate", 0) * win_rate_score -
+            scoring_weights.get("pnl_net", 0) * pnl_net_score +  # F系列: pnl_net权重
+            scoring_weights.get("win_rate", 0) * win_rate_score +
+            scoring_weights.get("win_rate_trades", 0) * win_rate_trades_score +  # F系列: win_rate_trades权重
+            scoring_weights.get("avg_pnl_per_trade", 0) * pnl_per_trade_score +  # F系列: avg_pnl_per_trade权重（使用pnl_per_trade_score）
+            scoring_weights.get("pnl_per_trade", 0.6) * pnl_per_trade_score -
             scoring_weights.get("cost_ratio", 0) * cost_ratio_score -
             scoring_weights.get("max_drawdown", 0) * max_drawdown_score -
-            scoring_weights.get("cost_ratio_notional", 0) * cost_ratio_notional_score +
-            scoring_weights.get("pnl_per_trade", 0.6) * pnl_per_trade_score -
+            scoring_weights.get("cost_ratio_notional", 0) * cost_ratio_notional_score -
             scoring_weights.get("trades_per_hour", 0.4) * trades_per_hour_score -
-            scoring_weights.get("cost_bps_on_turnover", 0.3) * cost_bps_score
+            scoring_weights.get("cost_bps_on_turnover", 0.3) * cost_bps_score -
+            scoring_weights.get("taker_ratio", 0.2) * taker_ratio_score +  # P1修复: taker_ratio负权重
+            scoring_weights.get("maker_ratio", 0.2) * maker_ratio_score  # P1修复: maker_ratio正权重
         )
         
         # 惩罚项：极端低样本（total_trades < 10）- 关键护栏：避免"高胜率=低出手"骗分

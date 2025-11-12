@@ -23,7 +23,7 @@ class ReplayFeeder:
         Args:
             config: Signal configuration (merged with defaults)
             output_dir: Output directory for signals
-            sink_kind: Sink type (jsonl/sqlite/null)
+            sink_kind: Sink type (jsonl/sqlite/null/dual)
         """
         # Ensure replay_mode is enabled
         if config is None:
@@ -155,9 +155,14 @@ class ReplayFeeder:
         return signal_count
     
     def close(self) -> None:
-        """Close the feeder and flush remaining signals"""
-        if hasattr(self.algo, "_sink") and self.algo._sink:
-            self.algo._sink.close()
+        """Close the feeder and flush remaining signals
+        
+        TASK-A4: 调用 CoreAlgorithm.close() 确保 SignalWriterV2 的批处理队列被刷新
+        """
+        # TASK-A4: 调用 CoreAlgorithm.close() 而不是直接关闭 sink
+        # CoreAlgorithm.close() 会正确处理 v2 路径的 SignalWriterV2 关闭
+        if self.algo:
+            self.algo.close()
         logger.info("[ReplayFeeder] Closed")
     
     def get_stats(self) -> Dict[str, Any]:

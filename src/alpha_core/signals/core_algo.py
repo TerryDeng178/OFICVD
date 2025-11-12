@@ -20,10 +20,38 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+# TASK-A4: 导入 signal/v2 相关组件
+try:
+    from .decision_engine import DecisionEngine
+    from .signal_writer import SignalWriterV2
+    from .signal_schema import SignalV2, SideHint, Regime, DecisionCode, DivType
+    from .config_hash import calculate_config_hash, extract_core_config
+    SIGNAL_V2_AVAILABLE = True
+except ImportError:
+    DecisionEngine = None
+    SignalWriterV2 = None
+    SignalV2 = None
+    SideHint = None
+    Regime = None
+    DecisionCode = None
+    DivType = None
+    calculate_config_hash = None
+    extract_core_config = None
+    SIGNAL_V2_AVAILABLE = False
+
+# TASK-A4 修复: logger 提前定义，避免在 ImportError 分支中使用未定义的 logger
+import logging
+logger = logging.getLogger(__name__)
+
+# 如果 v2 组件不可用，记录警告
+if not SIGNAL_V2_AVAILABLE:
+    logger.warning("[CoreAlgorithm] Signal v2 components not available, falling back to v1")
 
 # P0: 三级回退导入（alpha_core → 本地 → 不可用）
 try:
@@ -38,8 +66,6 @@ except Exception:
         StrategyMode = None
         MarketActivity = None
         STRATEGY_MODE_AVAILABLE = False
-
-logger = logging.getLogger(__name__)
 if not STRATEGY_MODE_AVAILABLE:
     logger.warning("StrategyModeManager not available, falling back to simple regime inference")
 
@@ -153,29 +179,41 @@ class JsonlSink(SignalSink):
         
         ts_ms = int(entry["ts_ms"])
         dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
-        minute = dt.strftime("%Y%m%d_%H%M")
+        # P0 修复5: JSONL 命名/轮转与路径风格统一 - 统一到 v2 风格（小时轮转、连字符）
+        hour_str = dt.strftime("%Y%m%d-%H")
         symbol = entry.get("symbol", "UNKNOWN")
         target_dir = self.ready_root / symbol
         target_dir.mkdir(parents=True, exist_ok=True)
-        target_file = target_dir / f"signals_{minute}.jsonl"
+        target_file = target_dir / f"signals-{hour_str}.jsonl"
         
         # P0: 添加水印字段，用于验证是否使用了CORE_ALGO的JsonlSink
         entry.setdefault("_writer", "core_jsonl_v406")
         
-        serialized = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+        # TASK-A4 修复6: 稳定序列化统一，JSONL 写入统一 sort_keys=True
+        serialized = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         
-        # P0: 按批次 fsync，兼顾数据安全与性能
-        # P1: 注意：_write_count 跨文件累积，fsync 发生在当次目标文件句柄上
-        # P0: JSONL rotate时确保最后一次fsync（在文件关闭前检查_write_count）
-        # 跟踪上一个文件，在文件切换时fsync上一个文件
-        prev_minute = getattr(self, '_last_minute', None)
-        current_minute = minute
+        # TASK-A4 修复2: 按批次 fsync，仅在达到阈值或小时轮转时 fsync
+        # 移除收尾兜底 fsync，避免每条写入都 fsync（抵消批量策略）
+        # P0 修复5: 统一到小时轮转（与 v2 风格一致）
+        prev_hour = getattr(self, '_last_minute', None)  # 保持变量名兼容，但实际是小时
+        current_hour = hour_str
+        
+        # 如果文件切换（小时轮转），对上一个文件执行补偿 fsync
+        if prev_hour is not None and prev_hour != current_hour:
+            prev_file = target_dir / f"signals-{prev_hour}.jsonl"
+            if prev_file.exists():
+                try:
+                    with prev_file.open("r+b") as prev_fp:
+                        prev_fp.flush()
+                        os.fsync(prev_fp.fileno())
+                except Exception as e:
+                    logger.warning(f"[JsonlSink] Failed to fsync previous file {prev_file}: {e}")
         
         with target_file.open("a", encoding="utf-8") as fp:
             fp.write(serialized + "\n")
             self._write_count += 1
             
-            # 每 N 次写入执行一次 fsync
+            # TASK-A4 修复2: 只在达到阈值时 fsync，移除收尾兜底 fsync
             if self._write_count >= self.fsync_every_n:
                 fp.flush()
                 os.fsync(fp.fileno())
@@ -183,20 +221,8 @@ class JsonlSink(SignalSink):
             else:
                 # 仍然 flush，但不 fsync（减少系统调用）
                 fp.flush()
-            
-            # P0: 在文件关闭前，如果_write_count>0（无论是否达到阈值），都要fsync
-            # 这确保rotate时最后一批数据也能fsync（避免只flush未fsync）
-            # 注意：如果_write_count >= fsync_every_n，已经在上面fsync并重置为0了
-            # 所以这里只需要处理 > 0 且 < fsync_every_n 的情况
-            # 但实际上，由于文件句柄在with语句结束后关闭，我们需要在关闭前fsync
-            # 如果_write_count > 0，说明还有未fsync的数据，需要fsync
-            if self._write_count > 0:
-                # 文件即将关闭，确保最后一批数据fsync
-                fp.flush()
-                os.fsync(fp.fileno())
-                self._write_count = 0
         
-        self._last_minute = current_minute
+        self._last_minute = current_hour  # P0 修复5: 实际存储的是小时字符串
 
     def close(self) -> None:
         """P0: 关闭时清理状态"""
@@ -532,9 +558,10 @@ class SqliteSink(SignalSink):
                     logger.warning(f"[SqliteSink] 批量刷新重试失败（第{retry_count}次）: {retry_e}")
             
             # 重试失败，写入补偿文件
-            failed_batch_file = Path("runtime/failed_batches.jsonl")
+            # P0 修复4: 失败批次补偿文件写入当前 output_dir（而非固定 runtime）
+            failed_batch_file = self.base_dir / "failed_batches.jsonl"
             try:
-                with open(failed_batch_file, "a", encoding="utf-8", newline="") as f:
+                with failed_batch_file.open("a", encoding="utf-8", newline="") as f:
                     for payload in self._batch_queue:
                         # 将payload转换为字典格式写入
                         record = {
@@ -673,23 +700,96 @@ class CoreAlgorithm:
         sink_cfg = self.config.get("sink", {})
         base_dir = Path(output_dir or sink_cfg.get("output_dir", "./runtime"))
         
-        # P0: 统一Sink选择口径（优先级：CLI/构造参数 > 配置 > 环境 > 默认）
-        if sink is None:
-            # 优先级：sink_kind参数 > config.sink.kind > V13_SINK环境变量 > 默认jsonl
-            final_sink_kind = sink_kind or sink_cfg.get("kind") or os.getenv("V13_SINK") or "jsonl"
-            sink = build_sink(final_sink_kind, base_dir)
-            # P0: 启动时明确打印最终生效值
-            logger.info(f"[CoreAlgorithm] Sink选择: sink_kind={sink_kind}, config.kind={sink_cfg.get('kind')}, V13_SINK={os.getenv('V13_SINK')}, 最终生效={final_sink_kind}")
-        self._sink = sink
-        # P0: 打印实际使用的sink类名，用于验证是否使用了CORE_ALGO的sink
-        sink_class_name = type(self._sink).__name__
-        logger.info(f"[CoreAlgorithm] sink_used={sink_class_name}")
-        if sink_class_name == "MultiSink":
-            # MultiSink: 打印子sink信息
-            if hasattr(self._sink, 'sinks'):
-                for i, sub_sink in enumerate(self._sink.sinks):
-                    sub_class_name = type(sub_sink).__name__
-                    logger.info(f"[CoreAlgorithm]  子Sink[{i}]: {sub_class_name}")
+        # TASK-A4: 初始化 signal/v2 组件（如果可用）
+        # 支持从 core.use_signal_v2 或顶层 use_signal_v2 读取
+        use_signal_v2_config = self.config.get("use_signal_v2") or self.config.get("core", {}).get("use_signal_v2") or os.getenv("V13_SIGNAL_V2") == "1"
+        self._use_v2 = SIGNAL_V2_AVAILABLE and bool(use_signal_v2_config)
+        
+        # TASK-A4 修复1: 启用 v2 时，不构建旧 _sink，避免双写路径不一致
+        if self._use_v2:
+            # v2 路径：只使用 SignalWriterV2
+            self._sink = None
+            logger.info("[CoreAlgorithm] Signal v2 enabled: skipping legacy sink initialization")
+            
+            # 提取 core.* 配置
+            core_config = extract_core_config(self.config) if extract_core_config else {}
+            
+            # 初始化 Decision Engine（会应用 ENV 覆盖）
+            self._decision_engine = DecisionEngine(core_config) if DecisionEngine else None
+            
+            # TASK-A4 修复5: 从实际 sink 对象映射到 sink_kind_v2（如果传入了外部 sink）
+            if sink is not None:
+                # 从 sink 对象推断类型
+                sink_class_name = type(sink).__name__
+                if "Jsonl" in sink_class_name or "jsonl" in sink_class_name.lower():
+                    sink_kind_v2 = "jsonl"
+                elif "Sqlite" in sink_class_name or "sqlite" in sink_class_name.lower():
+                    sink_kind_v2 = "sqlite"
+                elif "Multi" in sink_class_name or "dual" in sink_class_name.lower():
+                    sink_kind_v2 = "dual"
+                else:
+                    sink_kind_v2 = "dual"  # 默认 dual
+                logger.info(f"[CoreAlgorithm] Inferred sink_kind_v2={sink_kind_v2} from sink class {sink_class_name}")
+            else:
+                # 从配置推断
+                final_sink_kind = sink_kind or sink_cfg.get("kind") or os.getenv("V13_SINK") or "dual"
+                sink_kind_v2 = final_sink_kind
+                logger.info(f"[CoreAlgorithm] Using sink_kind_v2={sink_kind_v2} from config/env")
+            
+            # 初始化 SignalWriterV2
+            self._signal_writer_v2 = SignalWriterV2(base_dir, sink_kind=sink_kind_v2) if SignalWriterV2 else None
+            
+            # TASK-A4 修复4: 计算 config_hash（使用生效后的配置，包含 ENV 覆盖）
+            # P1 修复4: config_hash 纳入规则版本和特征版本因子（rules_ver + features_ver）
+            if self._decision_engine:
+                # 获取生效后的配置（包含 ENV 覆盖）
+                effective_config = self._decision_engine.get_effective_config()
+                # 获取规则版本和特征版本（从配置或环境变量）
+                rules_ver = os.getenv("CORE_RULES_VER", self.config.get("rules_ver", "core v1"))
+                features_ver = os.getenv("CORE_FEATURES_VER", self.config.get("features_ver", "ofi/cvd v3"))
+                # 将 rules_ver 和 features_ver 纳入哈希计算（确保一致性）
+                effective_config_with_versions = effective_config.copy()
+                effective_config_with_versions["rules_ver"] = rules_ver
+                effective_config_with_versions["features_ver"] = features_ver
+                self._config_hash = calculate_config_hash(effective_config_with_versions) if calculate_config_hash else "unknown"
+            else:
+                rules_ver = os.getenv("CORE_RULES_VER", self.config.get("rules_ver", "core v1"))
+                features_ver = os.getenv("CORE_FEATURES_VER", self.config.get("features_ver", "ofi/cvd v3"))
+                core_config_with_versions = core_config.copy()
+                core_config_with_versions["rules_ver"] = rules_ver
+                core_config_with_versions["features_ver"] = features_ver
+                self._config_hash = calculate_config_hash(core_config_with_versions) if calculate_config_hash else "unknown"
+            
+            # 生成 run_id（如果环境变量未设置）
+            self._run_id = os.getenv("RUN_ID", f"r{str(uuid.uuid4())[:8]}")
+            # 信号序列号（用于 signal_id）
+            self._signal_seq: Dict[str, int] = {}  # symbol -> seq
+            logger.info(f"[CoreAlgorithm] Signal v2 enabled: config_hash={self._config_hash}, run_id={self._run_id}")
+        else:
+            # v1 路径：使用旧 sink
+            # P0: 统一Sink选择口径（优先级：CLI/构造参数 > 配置 > 环境 > 默认）
+            if sink is None:
+                # 优先级：sink_kind参数 > config.sink.kind > V13_SINK环境变量 > 默认jsonl
+                final_sink_kind = sink_kind or sink_cfg.get("kind") or os.getenv("V13_SINK") or "jsonl"
+                sink = build_sink(final_sink_kind, base_dir)
+                # P0: 启动时明确打印最终生效值
+                logger.info(f"[CoreAlgorithm] Sink选择: sink_kind={sink_kind}, config.kind={sink_cfg.get('kind')}, V13_SINK={os.getenv('V13_SINK')}, 最终生效={final_sink_kind}")
+            self._sink = sink
+            # P0: 打印实际使用的sink类名，用于验证是否使用了CORE_ALGO的sink
+            sink_class_name = type(self._sink).__name__
+            logger.info(f"[CoreAlgorithm] sink_used={sink_class_name}")
+            if sink_class_name == "MultiSink":
+                # MultiSink: 打印子sink信息
+                if hasattr(self._sink, 'sinks'):
+                    for i, sub_sink in enumerate(self._sink.sinks):
+                        sub_class_name = type(sub_sink).__name__
+                        logger.info(f"[CoreAlgorithm]  子Sink[{i}]: {sub_class_name}")
+            
+            self._decision_engine = None
+            self._signal_writer_v2 = None
+            self._config_hash = None
+            self._run_id = None
+        
         self._base_dir = base_dir
         self._stats = SignalStats()
         self._last_ts_per_symbol: Dict[str, int] = {}
@@ -699,6 +799,15 @@ class CoreAlgorithm:
         self.min_consecutive_same_dir = int(self.config.get("min_consecutive_same_dir", 1))
         # 方向streak跟踪: symbol -> (direction, count)
         self._dir_streak_state: Dict[str, tuple] = {}  # symbol -> (last_direction, consecutive_count)
+        
+        # F3修复: 退出后冷静期跟踪
+        # 从strategy配置中读取cooldown_after_exit_sec
+        strategy_cfg = self.config.get("strategy", {})
+        self.cooldown_after_exit_sec = int(strategy_cfg.get("cooldown_after_exit_sec", 0))
+        # 跟踪每个symbol的最后退出时间（ts_ms）
+        self._last_exit_ts_per_symbol: Dict[str, int] = {}  # symbol -> last_exit_ts_ms
+        if self.cooldown_after_exit_sec > 0:
+            logger.info(f"[CoreAlgorithm] F3: 退出后冷静期已启用: cooldown_after_exit_sec={self.cooldown_after_exit_sec}s")
         
         if self.recompute_fusion:
             logger.info(f"[CoreAlgorithm] 回测端重算融合已启用: recompute_fusion=True, min_consecutive_same_dir={self.min_consecutive_same_dir}")
@@ -762,6 +871,14 @@ class CoreAlgorithm:
         return self._stats
 
     def close(self) -> None:
+        # TASK-A4: 关闭 SignalWriterV2（如果使用）
+        if self._use_v2 and self._signal_writer_v2:
+            try:
+                self._signal_writer_v2.close()
+            except Exception as e:
+                logger.error(f"[CoreAlgorithm] Failed to close SignalWriterV2: {e}")
+        
+        # TASK-A4 修复1: v2 路径不关闭旧 sink（因为未初始化）
         # P1: 打印sink使用摘要（类名和关键参数）
         if self._sink:
             sink_class_name = type(self._sink).__name__
@@ -780,13 +897,19 @@ class CoreAlgorithm:
             return None
 
         ts_ms = int(row["ts_ms"])
-        symbol = str(row["symbol"])
+        # P0 修复4: v1/v2 符号规范一致 - v1 路径也统一大写化（与 v2 契约一致）
+        symbol = str(row["symbol"]).upper()
 
         if self._is_duplicate(symbol, ts_ms):
             return None
 
         self._stats.processed += 1
 
+        # TASK-A4: 如果启用 v2，使用 Decision Engine 进行单点判定
+        if self._use_v2 and self._decision_engine and self._signal_writer_v2:
+            return self._process_feature_row_v2(row, ts_ms, symbol)
+        
+        # 否则使用 v1 路径（向后兼容）
         score = self._resolve_score(row)
         # 处理 None 值（Parquet 文件可能包含 None）
         consistency_val = row.get("consistency")
@@ -810,16 +933,48 @@ class CoreAlgorithm:
                 consistency = max(consistency, consistency_floor_on_divergence)
 
         regime = self._infer_regime(row)
+        
+        # F4修复: 场景化阈值覆写
+        scenario_2x2 = row.get("scenario_2x2")  # A_H, Q_H, A_L, Q_L
+        effective_weak_signal_threshold = self.config["weak_signal_threshold"]
+        effective_consistency_min = self.config["consistency_min"]
+        effective_min_consecutive = self.min_consecutive_same_dir
+        
+        scenario_overrides = self.config.get("scenario_overrides", {})
+        if scenario_overrides and scenario_2x2:
+            scenario_override = scenario_overrides.get(scenario_2x2, {})
+            if scenario_override:
+                # 应用场景化偏移
+                weak_offset = scenario_override.get("weak_signal_threshold_offset", 0.0)
+                consistency_offset = scenario_override.get("consistency_min_offset", 0.0)
+                min_consecutive_offset = scenario_override.get("min_consecutive_offset", 0)
+                
+                effective_weak_signal_threshold = self.config["weak_signal_threshold"] + weak_offset
+                effective_consistency_min = self.config["consistency_min"] + consistency_offset
+                effective_min_consecutive = self.min_consecutive_same_dir + min_consecutive_offset
+                
+                logger.debug(f"[CoreAlgorithm] F4: 场景{scenario_2x2}覆写: weak={effective_weak_signal_threshold:.3f}, consistency={effective_consistency_min:.3f}, min_consecutive={effective_min_consecutive}")
+        
         thresholds = self._thresholds_for_regime(regime)
         
         # 分模式/分场景的一致性阈值（优先级高于全局 consistency_min）
         consistency_min_per_regime = self.config.get("consistency_min_per_regime", {})
         if consistency_min_per_regime and regime in consistency_min_per_regime:
-            effective_consistency_min = consistency_min_per_regime[regime]
-        else:
-            effective_consistency_min = self.config["consistency_min"]
+            # 如果场景化覆写已应用，使用覆写后的值；否则使用regime特定值
+            if not (scenario_overrides and scenario_2x2 and scenario_overrides.get(scenario_2x2)):
+                effective_consistency_min = consistency_min_per_regime[regime]
 
         gating_reasons: List[str] = []
+        
+        # F3修复: 退出后冷静期检查（需要在ReplayFeeder中调用record_exit来更新）
+        if self.cooldown_after_exit_sec > 0:
+            last_exit_ts = self._last_exit_ts_per_symbol.get(symbol)
+            if last_exit_ts is not None:
+                elapsed_sec = (ts_ms - last_exit_ts) / 1000.0
+                if elapsed_sec < self.cooldown_after_exit_sec:
+                    # 仍在冷静期内，阻止信号
+                    gating_reasons.append(f"cooldown_after_exit({elapsed_sec:.1f}s<{self.cooldown_after_exit_sec}s)")
+                    self._stats.suppressed += 1
         if warmup:
             gating_reasons.append("warmup")
             self._stats.warmup_blocked += 1
@@ -829,7 +984,7 @@ class CoreAlgorithm:
             gating_reasons.append(f"lag_sec>{self.config['lag_cap_sec']}")
         if consistency < effective_consistency_min:
             gating_reasons.append("low_consistency")
-        if abs(score) < self.config["weak_signal_threshold"] and not warmup:
+        if abs(score) < effective_weak_signal_threshold and not warmup:
             gating_reasons.append("weak_signal")
         if reason_codes:
             gating_reasons.extend(f"reason:{code}" for code in reason_codes)
@@ -843,11 +998,12 @@ class CoreAlgorithm:
         confirm = candidate_direction != 0 and not gating_reasons
         
         # P0修复: B组连击确认（避免一跳即确认）
-        if confirm and self.min_consecutive_same_dir > 1:
+        # F4修复: 使用场景化覆写后的min_consecutive
+        if confirm and effective_min_consecutive > 1:
             streak = self._get_dir_streak(symbol, score)
-            if streak < self.min_consecutive_same_dir:
+            if streak < effective_min_consecutive:
                 confirm = False
-                gating_reasons.append(f"reverse_cooldown_insufficient_ticks({streak}<{self.min_consecutive_same_dir})")
+                gating_reasons.append(f"reverse_cooldown_insufficient_ticks({streak}<{effective_min_consecutive})")
                 self._stats.suppressed += 1
         
         signal_type = "neutral"
@@ -865,6 +1021,9 @@ class CoreAlgorithm:
         # P1: 添加created_at字段，与SQLite的created_at对齐
         from datetime import datetime, timezone
         created_at = datetime.now(timezone.utc).isoformat()
+        # P1 修复3: 契约字段统一 - v1 路径统一使用 decision_reason（与 v2 一致）
+        # 保留 gate_reason/guard_reason 作为向后兼容字段，但主要使用 decision_reason
+        decision_reason = ",".join(gating_reasons) if gating_reasons else None
         decision = {
             "ts_ms": ts_ms,
             "symbol": symbol,
@@ -874,11 +1033,12 @@ class CoreAlgorithm:
             "regime": regime,
             "div_type": row.get("div_type"),
             "confirm": confirm,
-            "gating": bool(gating_reasons),  # 兼容旧字段
+            "gating": 1 if not gating_reasons else 0,  # TASK-A4 修复3: 统一语义，gating=1 表示通过门控（与 v2 一致）
             "gating_blocked": bool(gating_reasons),  # 修复C: 明确语义 - gating_blocked=True表示"被门控阻止"
             "signal_type": signal_type,
-            "gate_reason": ",".join(gating_reasons) if gating_reasons else None,  # 修复C: 统一字段名为gate_reason
-            "guard_reason": ",".join(gating_reasons) if gating_reasons else None,  # 兼容旧字段
+            "decision_reason": decision_reason,  # 统一字段名（与 v2 一致）
+            "gate_reason": decision_reason,  # 兼容旧字段
+            "guard_reason": decision_reason,  # 兼容旧字段
             "run_id": run_id,
             "created_at": created_at,  # P1: 与SQLite的created_at对齐
         }
@@ -894,6 +1054,126 @@ class CoreAlgorithm:
             logger.exception("failed to emit signal for %s", symbol)
 
         return decision
+    
+    def _process_feature_row_v2(self, row: Dict[str, Any], ts_ms: int, symbol: str) -> Optional[Dict[str, Any]]:
+        """TASK-A4: 使用 signal/v2 路径处理特征行（单点判定）"""
+        score = self._resolve_score(row)
+        z_ofi = row.get("z_ofi")
+        z_cvd = row.get("z_cvd")
+        div_type_raw = row.get("div_type")
+        
+        # 转换 div_type 为字符串（如果存在）
+        div_type = None
+        if div_type_raw:
+            if isinstance(div_type_raw, str):
+                div_type = div_type_raw.lower()
+            elif hasattr(div_type_raw, 'value'):
+                div_type = div_type_raw.value.lower()
+            else:
+                div_type = str(div_type_raw).lower()
+        
+        # 使用 Decision Engine 进行单点判定
+        # P0 修复1: 回放/E2E 过期判定失真 - 回测/回放时传 now_ms=ts_ms，避免历史数据被判为过期
+        decision_result = self._decision_engine.decide(
+            ts_ms=ts_ms,
+            symbol=symbol,
+            score=score,
+            z_ofi=float(z_ofi) if z_ofi is not None else None,
+            z_cvd=float(z_cvd) if z_cvd is not None else None,
+            div_type=div_type,
+            now_ms=ts_ms,  # 回测/回放确保不过期
+        )
+        
+        # P0 修复3: 规范 symbol 大写化（与契约一致）
+        symbol_upper = str(symbol).upper()
+        
+        # 生成 signal_id（幂等键：<run_id>-<symbol>-<ts_ms>-<seq>）
+        if symbol_upper not in self._signal_seq:
+            self._signal_seq[symbol_upper] = 0
+        else:
+            self._signal_seq[symbol_upper] += 1
+        seq = self._signal_seq[symbol_upper]
+        signal_id = f"{self._run_id}-{symbol_upper}-{ts_ms}-{seq}"
+        
+        # 转换枚举值
+        regime_enum = decision_result["regime"]
+        decision_code_enum = decision_result["decision_code"]
+        side_hint_enum = decision_result["side_hint"]
+        div_type_enum = None
+        if div_type:
+            try:
+                div_type_enum = DivType(div_type) if DivType else None
+            except ValueError:
+                div_type_enum = None
+        
+        # P0 修复3: 规范 symbol 大写化（与契约一致）
+        symbol_upper = str(symbol).upper()
+        
+        # 创建 SignalV2 对象
+        signal_v2 = SignalV2(
+            ts_ms=ts_ms,
+            symbol=symbol_upper,
+            signal_id=signal_id,
+            score=score,
+            side_hint=side_hint_enum,
+            z_ofi=float(z_ofi) if z_ofi is not None else None,
+            z_cvd=float(z_cvd) if z_cvd is not None else None,
+            div_type=div_type_enum,
+            regime=regime_enum,
+            gating=decision_result["gating"],
+            confirm=decision_result["confirm"],
+            cooldown_ms=decision_result["cooldown_ms"],
+            expiry_ms=decision_result["expiry_ms"],
+            decision_code=decision_code_enum,
+            decision_reason=decision_result["decision_reason"],
+            config_hash=self._config_hash,
+            run_id=self._run_id,
+            meta={
+                "window_ms": self.config.get("window_ms"),
+                "features_ver": os.getenv("CORE_FEATURES_VER", self.config.get("features_ver", "ofi/cvd v3")),
+                "rules_ver": os.getenv("CORE_RULES_VER", self.config.get("rules_ver", "core v1")),
+            },
+        )
+        
+        # 写入 signal/v2
+        try:
+            self._signal_writer_v2.write(signal_v2)
+        except Exception as e:
+            logger.error(f"[CoreAlgorithm] Failed to write signal v2: {e}")
+        
+        # 更新统计
+        if decision_result["confirm"]:
+            self._stats.emitted += 1
+        else:
+            self._stats.suppressed += 1
+        
+        # P0 修复2: gating_blocked 语义修复 - 仅当 gating==0 时才设置 gating_blocked 和 gate_reason
+        gating = decision_result["gating"]
+        confirm = decision_result["confirm"]
+        gating_blocked = (gating == 0)
+        gate_reason = decision_result["decision_reason"] if gating_blocked else None
+        
+        # 返回兼容格式（供下游使用）
+        return {
+            "ts_ms": ts_ms,
+            "symbol": symbol_upper,  # P0 修复3: 使用大写 symbol
+            "score": score,
+            "z_ofi": z_ofi,
+            "z_cvd": z_cvd,
+            "regime": regime_enum.value if hasattr(regime_enum, 'value') else str(regime_enum),
+            "div_type": div_type,
+            "confirm": confirm,
+            "gating": gating,
+            "gating_blocked": gating_blocked,  # P0 修复2: 仅当 gating==0 时为 True
+            "gate_reason": gate_reason,  # P0 修复2: 仅当 gating==0 时设置
+            "guard_reason": gate_reason,  # 兼容旧字段
+            "signal_type": "buy" if confirm and score > 0 else ("sell" if confirm and score < 0 else "neutral"),
+            "run_id": self._run_id,
+            "signal_id": signal_id,
+            "decision_code": decision_code_enum.value if hasattr(decision_code_enum, 'value') else str(decision_code_enum),
+            "decision_reason": decision_result["decision_reason"],
+            "config_hash": self._config_hash,
+        }
 
     def process_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         emitted: List[Dict[str, Any]] = []
@@ -904,10 +1184,18 @@ class CoreAlgorithm:
         return emitted
 
     def _validate_row(self, row: Dict[str, Any]) -> bool:
-        # 检查关键字段（ts_ms, symbol, z_ofi, z_cvd）必须存在且不为None
+        # P0 修复5: 输入校验过严导致丢行 - z_ofi/z_cvd 降级为可选（缺失告警但继续计算）
+        # 检查关键字段（ts_ms, symbol）必须存在且不为None
+        # z_ofi/z_cvd 缺失时告警但继续处理（后续逻辑会用 0.0 兜底）
         # 其他字段（lag_sec, consistency, warmup, spread_bps）如果缺失，使用默认值
-        critical_fields = ["ts_ms", "symbol", "z_ofi", "z_cvd"]
+        critical_fields = ["ts_ms", "symbol"]
         missing_critical = [field for field in critical_fields if field not in row or row.get(field) is None]
+        
+        # P0 修复5: z_ofi/z_cvd 缺失时告警但不丢弃
+        if "z_ofi" not in row or row.get("z_ofi") is None:
+            logger.debug(f"[CoreAlgorithm] z_ofi missing for symbol={row.get('symbol')}, will use 0.0")
+        if "z_cvd" not in row or row.get("z_cvd") is None:
+            logger.debug(f"[CoreAlgorithm] z_cvd missing for symbol={row.get('symbol')}, will use 0.0")
         if missing_critical:
             logger.warning("feature row missing critical fields: %s", missing_critical)
             return False
@@ -933,6 +1221,7 @@ class CoreAlgorithm:
         """解析融合分数
         
         P0修复: 如果recompute_fusion启用，强制重算融合分数
+        P1 修复3: 融合分数加温索化/截断（winsorize 或 tanh），减少极值一跳即确认
         """
         score = row.get("fusion_score")
         if self.recompute_fusion or score is None:
@@ -944,8 +1233,21 @@ class CoreAlgorithm:
             z_cvd_val = row.get("z_cvd")
             ofi = float(z_ofi_val if z_ofi_val is not None else 0.0)
             cvd = float(z_cvd_val if z_cvd_val is not None else 0.0)
-            return w_ofi * ofi + w_cvd * cvd
-        return float(score)
+            
+            # P1 修复3: 对 z 值进行 tanh 截断（将极值限制在合理范围内）
+            # tanh 函数将输入映射到 (-1, 1)，然后乘以一个缩放因子
+            # 这里使用 tanh(z/3) * 5，将 z 值限制在约 [-5, 5] 范围内
+            import math
+            ofi_clipped = math.tanh(ofi / 3.0) * 5.0
+            cvd_clipped = math.tanh(cvd / 3.0) * 5.0
+            
+            score = w_ofi * ofi_clipped + w_cvd * cvd_clipped
+        else:
+            score = float(score)
+        
+        # 对最终分数也进行 tanh 截断（双重保护）
+        import math
+        return math.tanh(score / 3.0) * 5.0
     
     def _get_dir_streak(self, symbol: str, score: float) -> int:
         """计算方向streak（连续同向tick数）
@@ -1138,3 +1440,16 @@ class CoreAlgorithm:
         regime_cfg = thresholds.get(regime, {})
         base_cfg = thresholds.get("base", {})
         return _merge_dict(base_cfg, regime_cfg)
+    
+    def record_exit(self, symbol: str, ts_ms: int) -> None:
+        """F3修复: 记录退出时间，用于退出后冷静期
+        
+        注意：此方法需要在TradeSimulator退出持仓时调用，以更新退出时间戳
+        
+        Args:
+            symbol: 交易对符号
+            ts_ms: 退出时间戳（毫秒）
+        """
+        if self.cooldown_after_exit_sec > 0:
+            self._last_exit_ts_per_symbol[symbol] = ts_ms
+            logger.debug(f"[CoreAlgorithm] F3: 记录退出时间 {symbol} @ {ts_ms}")

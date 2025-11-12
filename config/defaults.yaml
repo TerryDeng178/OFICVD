@@ -52,8 +52,54 @@ features:
     lookback_bars: 60
 
 sink:
-  kind: jsonl         # jsonl|sqlite
+  kind: jsonl         # jsonl|sqlite|dual
   output_dir: ./runtime
+  db_name: signals.db  # SQLite数据库文件名（仅sqlite/dual使用）
+
+executor:
+  mode: backtest      # backtest|testnet|live
+  sink: ${sink.kind}  # 继承全局sink配置
+  output_dir: ${sink.output_dir}  # 继承全局output_dir
+  symbols: [BTCUSDT]
+  slippage_bps: 1.0   # 回测用滑点（bps）
+  fee_bps: 1.93       # 成本估计，回测/测试网默认（bps）
+  max_parallel_orders: 4  # 最大并发订单数（live模式）
+  order_size_usd: 100     # 每单名义额（USD）
+  tif: GTC               # 订单有效期（GTC/IOC/FOK）
+  order_type: market     # 订单类型（market/limit）
+
+adapter:
+  impl: backtest  # backtest|testnet|live（如果未设置，从executor.mode推断）
+  rate_limit:
+    place: { rps: 8, burst: 16 }
+    cancel: { rps: 5, burst: 10 }
+    query: { rps: 10, burst: 20 }
+  max_inflight_orders: 32
+  rules_ttl_sec: 300
+  idempotency_ttl_sec: 600
+  order_size_usd: 100
+  tif: GTC
+  order_type: market
+  retry:
+    max_retries: 5
+    base_delay_ms: 200
+    factor: 2.0
+    jitter_pct: 0.25
+
+broker:
+  name: binance-futures
+  api_key_env: BINANCE_API_KEY      # 环境变量名（优先）
+  secret_env: BINANCE_API_SECRET    # 环境变量名（优先）
+  # api_key: ""                      # 直接配置（不推荐，仅用于测试）
+  # secret_key: ""                   # 直接配置（不推荐，仅用于测试）
+  testnet: true         # 是否使用测试网（true=测试网，false=实盘）
+  dry_run: true         # dry-run模式（testnet模式默认开启）
+  mock_enabled: true    # 是否启用Mock模式（默认启用，设为false使用真实API）
+  # ⚠️ 实盘模式配置示例（谨慎使用）:
+  # testnet: false
+  # dry_run: false
+  # mock_enabled: false
+  # 实盘密钥通过环境变量设置：.\scripts\setup_binance_live_env.ps1
 
 components:
   ofi:
@@ -73,8 +119,30 @@ components:
     pass
   
   strategy:
-    # TODO: 添加 STRATEGYMODE 配置参数
-    pass
+    risk:
+      enabled: ${RISK_INLINE_ENABLED:false}  # 环境变量控制，默认关闭（回退到legacy）
+      guards:
+        spread_bps_max: 8.0      # 价差上限（bps），与signal.spread_bps_cap对齐
+        lag_sec_cap: 1.5         # 延迟上限（秒），与signal.lag_cap_sec对齐
+        activity_min_tpm: 10.0   # 最小活跃度（每分钟交易数）
+      position:
+        max_notional_usd: 20000  # 最大名义额（USD）
+        max_leverage: 5          # 最大杠杆
+        symbol_limits:
+          BTCUSDT: { max_qty: 0.5 }
+          ETHUSDT: { max_qty: 5.0 }
+      stop_rules:
+        take_profit_bps: 40      # 止盈（bps）
+        stop_loss_bps: 25        # 止损（bps）
+      shadow_mode:
+        compare_with_legacy: true  # 是否启用shadow对比
+        diff_alert: ">=1%"         # 不一致占比阈值
+      logging:
+        sampling_rate: 0.01       # 通过单抽样率（1%，可配置，便于临时提权到100%）
+        log_passed: true           # 是否记录通过单（抽样）
+        log_denied: true           # 是否记录拒绝单（100%）
+        log_schema_failed: true    # 是否记录Schema校验失败（100%）
+        log_shadow_alert: true     # 是否记录Shadow告警（100%）
 
 signal:
   dedupe_ms: 250
@@ -143,3 +211,17 @@ strategy_mode:
       min_volume_usd: 200000              # 最小成交量（USD）
       use_median: true                    # 使用中位数统计（提高稳健性）
       winsorize_percentile: 95            # Winsorize 百分位（去噪）
+
+backtest:
+  taker_fee_bps: 2.0      # Taker费率（bps）
+  slippage_bps: 1.0       # 滑点（bps）
+  notional_per_trade: 1000  # 每单名义额（USD）
+  reverse_on_signal: false  # 是否反向开仓
+  take_profit_bps: null     # 止盈（bps），null表示不启用
+  stop_loss_bps: null       # 止损（bps），null表示不启用
+  min_hold_time_sec: null   # 最小持仓时长（秒），null表示不启用
+  max_hold_time_sec: 3600   # 最大持仓时长（秒）
+  deadband_bps: 0          # 死区带（bps）
+  ignore_gating: false      # 是否忽略门控（用于纯策略收益评估）
+  rollover_timezone: UTC    # 日切时区
+  rollover_hour: 0          # 日切小时（0-23）

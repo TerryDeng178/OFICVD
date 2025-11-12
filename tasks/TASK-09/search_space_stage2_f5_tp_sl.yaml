@@ -1,0 +1,31 @@
+stage: 2
+description: "F5组：止盈/止损与时间中性退出（把单笔收益拉正）"
+target: "胜率≥45% 且 avg_pnl_per_trade由负转正（>0）"
+search_space:
+  backtest.take_profit_bps: [12, 15, 18]
+  backtest.stop_loss_bps: [8, 10, 12]
+  backtest.min_hold_time_sec: [180, 240]
+  note: "F5: 网格搜索TP/SL，增加时间中性退出（min_hold后fusion_score回落<0.3允许退出）"
+
+constraints:
+  trades_per_hour:
+    max: 20
+    description: "频率硬约束 ≤20/h"
+  cost_bps_on_turnover:
+    max: 1.75
+    description: "成本硬约束 ≤1.75 bps"
+
+scoring_weights:
+  pnl_net: 1.0
+  avg_pnl_per_trade: 0.6
+  trades_per_hour: -0.4
+  cost_bps_on_turnover: -0.5
+  win_rate_trades: 0.0
+  description: "STAGE-2: 纳入成本和密度，重点优化PNL和单笔收益"
+
+hard_constraints:
+  avg_pnl_per_trade: ">= 0"
+  pnl_net: ">= 0"
+  trades_per_hour: "<= 20"
+  cost_bps_on_turnover: "<= 1.75"
+

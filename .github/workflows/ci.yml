@@ -229,3 +229,68 @@ jobs:
           logs/report/parity_diff_*.json
         retention-days: 30
 
+  executor-e2e-test:
+    name: 执行层E2E测试
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+        pip install prometheus-client  # 安装Prometheus客户端（如果未在requirements中）
+    
+    - name: 运行执行层E2E测试
+      shell: bash
+      run: |
+        python -m pytest tests/test_executor_e2e.py -v --tb=short
+    
+    - name: 运行执行层单元测试
+      shell: bash
+      run: |
+        python -m pytest tests/test_executor_contract_v1.py tests/test_executor_precheck.py tests/test_exec_log_sink_outbox.py tests/test_idempotency.py tests/test_price_alignment.py tests/test_time_provider.py tests/test_shadow_execution.py tests/test_strategy_mode_integration.py tests/test_executor_logging.py -v --tb=short
+    
+    - name: 检查测试通过率
+      shell: bash
+      run: |
+        # 运行所有执行层测试并检查通过率
+        TEST_RESULT=$(python -m pytest tests/test_executor_contract_v1.py tests/test_executor_precheck.py tests/test_exec_log_sink_outbox.py tests/test_idempotency.py tests/test_price_alignment.py tests/test_time_provider.py tests/test_shadow_execution.py tests/test_strategy_mode_integration.py tests/test_executor_logging.py tests/test_executor_e2e.py -v --tb=line -q 2>&1 | tail -1)
+        echo "$TEST_RESULT"
+        
+        # 提取通过数和总数
+        if echo "$TEST_RESULT" | grep -qE "passed.*skipped"; then
+          PASSED=$(echo "$TEST_RESULT" | grep -oE "[0-9]+ passed" | grep -oE "[0-9]+")
+          SKIPPED=$(echo "$TEST_RESULT" | grep -oE "[0-9]+ skipped" | grep -oE "[0-9]+")
+          TOTAL=$((PASSED + SKIPPED))
+          echo "Passed: $PASSED, Skipped: $SKIPPED, Total: $TOTAL"
+          
+          # 验证通过率（跳过不计入失败）
+          if [ "$PASSED" -lt 130 ]; then
+            echo "Error: Less than 130 tests passed (got $PASSED)"
+            exit 1
+          fi
+        else
+          echo "Error: Could not parse test results"
+          exit 1
+        fi
+    
+    - name: 上传测试报告
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: executor-test-results-${{ matrix.os }}-${{ github.run_number }}
+        path: |
+          .pytest_cache/**
+        retention-days: 7
+

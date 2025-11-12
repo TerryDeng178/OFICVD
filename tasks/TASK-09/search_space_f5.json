@@ -1,0 +1,30 @@
+{
+  "stage": 2,
+  "description": "F5组：ETH专用覆写（只在ETH掉队时启用）",
+  "target": "避免ETH成为拖累",
+  "search_space": {
+    "signal.symbol_overrides.ETHUSDT.weak_signal_threshold": [0.84, 0.86],
+    "signal.symbol_overrides.ETHUSDT.consistency_min": [0.57, 0.59],
+    "signal.symbol_overrides.ETHUSDT.dedupe_ms": [12000, 14000],
+    "signal.symbol_overrides.ETHUSDT.min_consecutive_same_dir": [6, 7],
+    "backtest.fee_maker_taker.symbol_overrides.ETHUSDT.maker_ttl_ms": [200, 500],
+    "note": "F5: ETH专用覆写参数（需要在代码中实现symbol_overrides支持）"
+  },
+  "constraints": {
+    "eth_net_pnl": {
+      "min": -10.0,
+      "description": "ETH净PnL不显著为负（≥-$10）"
+    }
+  },
+  "scoring_weights": {
+    "net_pnl": 0.25,
+    "pnl_per_trade": 0.25,
+    "trades_per_hour": 0.15,
+    "trades_per_hour_threshold": 25,
+    "cost_bps_on_turnover": 0.15,
+    "cost_bps_threshold": 1.75,
+    "eth_net_pnl": 0.20,
+    "description": "F5: 重点优化ETH表现"
+  }
+}
+

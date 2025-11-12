@@ -1,0 +1,79 @@
+# Signal v2 回测配置文件
+# TASK-A4: 包含 core.* 配置用于 signal/v2
+
+# 继承 defaults.yaml 的基础配置
+# 可以通过环境变量或命令行参数覆盖
+
+signal:
+  dedupe_ms: 250
+  weak_signal_threshold: 0.15
+  consistency_min: 0.12
+  consistency_min_per_regime:
+    active: 0.10
+    quiet: 0.15
+  consistency_floor: 0.10
+  consistency_floor_when_abs_score_ge: 0.45
+  consistency_floor_on_divergence: 0.15
+  spread_bps_cap: 20.0
+  lag_cap_sec: 3.0
+  weights:
+    w_ofi: 0.6
+    w_cvd: 0.4
+  thresholds:
+    base:
+      buy: 0.6
+      strong_buy: 1.2
+      sell: -0.6
+      strong_sell: -1.2
+    active:
+      buy: 0.5
+      strong_buy: 1.0
+      sell: -0.5
+      strong_sell: -1.0
+    quiet:
+      buy: 0.7
+      strong_buy: 1.4
+      sell: -0.7
+      strong_sell: -1.4
+  sink:
+    kind: dual  # jsonl|sqlite|dual
+    output_dir: ./runtime
+  replay_mode: 1
+  debug: true
+
+# TASK-A4: Signal v2 core.* 配置
+# 注意：use_signal_v2 也可以在顶层配置，或通过环境变量 V13_SIGNAL_V2=1 设置
+use_signal_v2: true
+core:
+  expiry_ms: 60000         # 信号有效期（ms）
+  cooldown_ms: 30000       # 方向级冷却（buy/sell 独立，ms）
+  allow_quiet: false       # 是否允许 quiet regime
+  gating:
+    ofi_z: 1.5             # OFI z-score 门控阈值
+    cvd_z: 1.2             # CVD z-score 门控阈值
+    enable_divergence_alt: true   # 背离可作为门控替代路径
+  threshold:
+    entry:
+      trend: 1.8           # trend regime 入场阈值
+      revert: 2.2          # revert regime 入场阈值
+      quiet: 2.8           # quiet regime 入场阈值
+  regime:
+    z_t: 1.2               # trend regime z-score 阈值
+    z_r: 1.0               # revert regime z-score 阈值
+  features_ver: "ofi/cvd v3"  # 特征版本（用于 config_hash）
+  rules_ver: "core v1"        # 规则版本（用于 config_hash）
+
+backtest:
+  taker_fee_bps: 2.0
+  slippage_bps: 1.0
+  notional_per_trade: 1000
+  reverse_on_signal: false
+  take_profit_bps: null
+  stop_loss_bps: null
+  min_hold_time_sec: null
+  max_hold_time_sec: 3600
+  deadband_bps: 0
+  ignore_gating: false
+  rollover_timezone: UTC
+  rollover_hour: 0
+

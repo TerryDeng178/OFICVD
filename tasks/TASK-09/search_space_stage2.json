@@ -3,8 +3,12 @@
   "description": "阶段2：提收益 + 控成本",
   "target": "net_pnl ↑、pnl_per_trade ↑，频次恢复到目标",
   "search_space": {
+    "components.fusion.adaptive_cooldown_k": [0.5, 0.7, 1.0, 1.2, 1.5],
+    "components.fusion.flip_rearm_margin": [0.10, 0.15, 0.20, 0.25, 0.30],
+    "components.fusion.min_consecutive": [2, 3, 4],
     "components.fusion.burst_coalesce_ms": [0, 100, 200, 300],
-    "backtest.min_hold_time_sec": [60, 90, 120]
+    "backtest.min_hold_time_sec": [60, 90, 120],
+    "note": "P1修复: 扩展搜索空间，加入冷却与翻转重臂策略参数"
   },
   "constraints": {
     "scenario_thresholds": {
@@ -25,11 +29,15 @@
     }
   },
   "scoring_weights": {
-    "net_pnl": 0.3,
-    "pnl_per_trade": 0.3,
-    "trades_per_hour": 0.2,
-    "cost_ratio_notional": 0.2,
-    "description": "评分加入 pnl_per_trade 与 trades_per_hour 的区间惩罚"
+    "net_pnl": 0.25,
+    "pnl_per_trade": 0.25,
+    "trades_per_hour": 0.15,
+    "trades_per_hour_threshold": 50,
+    "cost_bps_on_turnover": 0.20,
+    "cost_bps_threshold": 1.75,
+    "taker_ratio": 0.10,
+    "maker_ratio": 0.05,
+    "description": "P1修复: 评分加入成本/频率硬惩罚，cost_bps和taker_ratio强负权重"
   }
 }
 
