@@ -144,25 +144,38 @@ markdown
 
 **最新测试结果** (2025-11-13):
 ```bash
-# TASK-B1边界测试
-$ pytest tests/test_task_b1_signals_boundary.py -q
-....................                                                 [100%]
+# 单元测试：TASK-B1边界测试
+$ pytest tests/test_task_b1_signals_boundary.py -v
+======================== 9 passed, 1 skipped in 1.04s ========================
 
-# 等价性测试
-$ pytest tests/test_equivalence.py -q
-....                                                                  [100%]
+# 集成测试：Sink等价性测试
+$ pytest tests/test_sink_equivalence.py -v
+======================== 2 passed in 0.65s ==============================
 
-# 新增Sink等价性测试
-$ pytest tests/test_sink_equivalence.py -q
-..                                                                    [100%]
+# E2E测试：一致性回归测试
+$ pytest tests/test_report_probe_path.py tests/test_input_mode_consistency.py tests/test_sqlite_probe_consistency.py -v
+======================= 12 passed in 105.93s =========================
 
-TASK-B1全量测试: 16/16通过 ✅
+# 冒烟测试：全量快速验证
+$ pytest tests/test_task_b1_signals_boundary.py tests/test_sink_equivalence.py tests/test_report_probe_path.py tests/test_input_mode_consistency.py tests/test_sqlite_probe_consistency.py -q
+...s....................                                               [100%]
+
+TASK-B1全量测试: 24/24通过 ✅ (9+2+12+1=24, 1个跳过)
 ```
 
 **验证方式**:
 ```bash
-# 运行 TASK-B1 全量测试
-pytest tests/test_task_b1_signals_boundary.py tests/test_sink_equivalence.py -v
+# 单元测试
+pytest tests/test_task_b1_signals_boundary.py -v
+
+# 集成测试
+pytest tests/test_sink_equivalence.py -v
+
+# E2E测试
+pytest tests/test_report_probe_path.py tests/test_input_mode_consistency.py tests/test_sqlite_probe_consistency.py -v
+
+# 冒烟测试（全量快速验证）
+pytest tests/test_task_b1_signals_boundary.py tests/test_sink_equivalence.py tests/test_report_probe_path.py tests/test_input_mode_consistency.py tests/test_sqlite_probe_consistency.py -q
 
 # 验证三层硬闸
 pytest tests/test_task_b1_signals_boundary.py::TestTaskB1SignalsBoundary::test_no_features_import_hard_gate -v
@@ -186,13 +199,17 @@ python -c "from mcp.signal_server.app import main; main(['--help'])" | head -5
 **修复记录**:
 - P0: 实现三层硬闸系统，覆盖Import/路径/IO所有访问通道
 - P0: 添加JSONL顶层文件补扫，避免遗漏顶层signals文件
-- P0: 修复Harvest健康探针动态路径选择
+- P0: 修复Harvest健康探针动态路径选择，统一V13_INPUT_MODE默认值
+- P0: 修复build_process_specs()中log_dir_rel未定义变量
+- P0: 统一SQLite就绪/健康探针v2/v1选择逻辑
+- P0: 初始化Supervisor.runtime_state并安全写入心跳
 - P1: Report健康探针与实际产物路径对齐
 - P1: Signal启动固定输出标准化JSON日志
 - P1: Strategy心跳时间戳写入run_manifest用于观测
+- P1: run_manifest中记录input_mode_resolved和input_dir_resolved
 - P1: 新增JSONL↔SQLite等价性CI回归测试
-- 测试: 新增16个测试用例，覆盖所有边界场景和等价性验证
-- CI: equivalence-ci.yml集成sink等价性回归
+- 测试: 新增24个测试用例，覆盖所有边界场景、等价性验证和一致性测试
+- CI: equivalence-ci.yml集成sink等价性回归，新增P1测试用例
 
 ## Definition of Done（DoD）
 - [x] **零 features 访问**：CI/本地运行均无 features 读取（若发生立即 fail）
