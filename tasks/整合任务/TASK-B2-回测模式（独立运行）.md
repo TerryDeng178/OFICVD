@@ -68,12 +68,30 @@ markdown
 - `run_manifest.json`
 
 ### 模式 B：信号复现（signals→trades/pnl）
-**输入**  
-- `--signals-src`: `jsonl://<dir>` 或 `sqlite://<db_path>`  
+**输入**
+- `--signals-src`: `jsonl://<dir>` 或 `sqlite://<db_path>`
 - 其余同上
 
-**输出**  
+**输出**
 - 同上（不重复产出 signals，除非 `--reemit-signals`）
+
+### 数据源配置
+**config/backtest.yaml** 支持以下数据源配置：
+
+```yaml
+# Data source configuration
+data:
+  # 价格数据源目录（用于回测时的价格查询）
+  # 支持ready格式: deploy/data/ofi_cvd/ready/features/{SYMBOL}/features*.jsonl
+  # 支持preview格式: deploy/data/ofi_cvd/preview/date=*/hour=*/symbol=*/kind=features/*.parquet
+  features_price_dir: "deploy/data/ofi_cvd"
+```
+
+**价格缓存机制**:
+- 模式B自动加载价格缓存用于真实价格查询
+- 支持preview和ready两种数据格式自动检测
+- 当价格数据加载失败时记录CRITICAL错误并在manifest中标记
+- 价格点数为0时会发出质量警告（使用默认价格可能影响结果准确性）
 
 ---
 
@@ -108,8 +126,199 @@ json
 复制代码
 {"run_id":"bt_20251113_012345","mode":"A|B","symbols":["BTCUSDT"],"start":"...","end":"...","seed":42,
  "config_hash":"...","env":{"BT_*":"...","V13_*":"..."}, "git":{"commit":"..."},
- "perf":{"rows_per_sec":..., "max_rss_gib":...}}
-注：字段命名与 Reporter/策略一致，确保“产物可被 Report 服务直接消费”。（承接你的草稿目标。TASK-B2-回测模式（独立运行））
+ "perf":{"rows_per_sec":..., "max_rss_gib":..., "price_source":{"price_cache_loaded":0,"price_cache_failure":true,"price_cache_error":"CRITICAL: No price data loaded..."}}}
+---
+
+## 📁 数据目录约定表
+
+### 输入数据目录结构
+
+| 路径 | 产出方 | 格式 | 用途 | 更新频率 |
+|------|--------|------|------|----------|
+| `deploy/data/ofi_cvd/preview/date=YYYY-MM-DD/hour=HH/symbol={SYMBOL}/kind=features/*.parquet` | Harvester | Parquet | 实时特征数据（推荐） | 实时 |
+| `deploy/data/ofi_cvd/ready/features/{SYMBOL}/features_*.jsonl` | Harvester | JSONL | 历史特征数据 | 批量 |
+| `deploy/data/ofi_cvd/raw/` | Harvester | JSONL/Parquet | 原始订单簿数据 | 实时 |
+| `runtime/signals.db` | CoreAlgorithm/Strategy | SQLite | 信号数据库 | 实时 |
+| `runtime/ready/signal/*.jsonl` | CoreAlgorithm/Strategy | JSONL | 信号快照 | 批量 |
+
+### 输出产物目录结构
+
+| 路径 | 产出方 | 格式 | 用途 | 模式 |
+|------|--------|------|------|------|
+| `backtest_out/{RUN_ID}/signals.jsonl` | Backtest-A | JSONL | 信号产物 | 仅A |
+| `backtest_out/{RUN_ID}/signals.sqlite` | Backtest-A | SQLite | 信号产物 | 仅A |
+| `backtest_out/{RUN_ID}/trades.jsonl` | Backtest-A/B | JSONL | 交易记录 | A/B |
+| `backtest_out/{RUN_ID}/pnl_daily.jsonl` | Backtest-A/B | JSONL | 日收益统计 | A/B |
+| `backtest_out/{RUN_ID}/run_manifest.json` | Backtest-A/B | JSON | 运行清单 | A/B |
+| `backtest_out/{RUN_ID}/logs/` | Backtest-A/B | LOG | 运行日志 | A/B |
+
+### 配置与脚本文件
+
+| 路径 | 产出方 | 格式 | 用途 |
+|------|--------|------|------|
+| `config/backtest.yaml` | DevOps | YAML | 回测配置模板 |
+| `scripts/run_backtest.sh` | DevOps | Shell | Linux启动脚本 |
+| `scripts/run_backtest.ps1` | DevOps | PowerShell | Windows启动脚本 |
+| `src/backtest/app.py` | Development | Python | 核心回测应用 |
+| `src/backtest/__init__.py` | Development | Python | 包初始化 |
+
+### 数据流向图
+
+```
+原始数据流:
+Harvester → deploy/data/ofi_cvd/raw/ → deploy/data/ofi_cvd/preview/ → deploy/data/ofi_cvd/ready/
+
+信号生成流:
+deploy/data/ofi_cvd/preview/ → CoreAlgorithm → runtime/signals.db
+
+回测输入流:
+模式A: deploy/data/ofi_cvd/preview/ → Backtest → 产物
+模式B: runtime/signals.db + deploy/data/ofi_cvd/preview/ → Backtest → 产物
+
+消费方:
+Report Service ← backtest_out/{RUN_ID}/
+Analysis Tools ← backtest_out/{RUN_ID}/
+```
+
+**目录约束**:
+- 输入目录：只读，不得修改
+- 输出目录：`backtest_out/` 及其子目录可写，只允许标准产物文件
+  - 允许的文件类型：`.jsonl`, `.json`, `.sqlite`, `.log`
+  - 允许的文件名：`signals.jsonl`, `signals.sqlite`, `trades.jsonl`, `pnl_daily.jsonl`, `run_manifest.json`
+  - 系统会在运行结束时自动验证输出结构约束
+- 临时目录：`runtime/` 用于中间产物，可清理
+
+---
+
+## 📋 产物Schema详解
+
+### signals.jsonl - 信号产物（模式A产出）
+**格式**: JSON Lines，每行一个信号对象
+
+**字段说明**:
+```json
+{
+  "ts_ms": 1731408000123,           // 信号时间戳（毫秒），UTC
+  "symbol": "BTCUSDT",               // 交易对
+  "score": 0.87,                     // 信号分数（-1.0 ~ 1.0）
+  "z_ofi": 1.23,                     // OFI Z分数
+  "z_cvd": 0.45,                     // CVD Z分数
+  "regime": "trend",                 // 市场状态（trend|mean_revert|sideways）
+  "div_type": "none",                // 背离类型（none|bullish|bearish）
+  "confirm": true,                   // 信号确认状态（布尔）
+  "gating": ["warmup_passed","low_consistency_passed"], // 门控原因数组（空数组表示通过）
+  "run_id": "bt_20251113_123456",    // 运行ID
+  "signal_type": "buy",              // 信号类型（buy|sell|strong_buy|strong_sell|neutral）
+  "side_hint": "BUY",                // 方向提示（BUY|SELL|LONG|SHORT|BULLISH|BEARISH）
+  "guard_reason": "warmup_passed"    // 门控原因描述
+}
+```
+
+### trades.jsonl - 交易产物
+**格式**: JSON Lines，每行一个交易对象
+
+**字段说明**:
+```json
+{
+  "ts_ms": 1731408000456,           // 交易时间戳（毫秒），UTC
+  "symbol": "BTCUSDT",               // 交易对
+  "side": "BUY",                     // 交易方向（BUY|SELL）
+  "exec_px": 67321.5,                // 执行价格
+  "qty": 0.01,                       // 交易数量
+  "maker": true,                     // 是否maker成交
+  "fee_bps": -25,                    // 手续费（bps，maker为负，taker为正）
+  "fee_abs": -0.001683,              // 绝对手续费金额
+  "slip_bps": 0.2,                   // 滑点（bps）
+  "lat_ms": 50,                      // 延迟（毫秒）
+  "reason": "signal_confirmed",      // 交易原因
+  "order_id": "bt_1731408000456",    // 订单ID
+  "position_id": "bt_pos_1",         // 持仓ID
+  "turnover": 673.215                // 成交额
+}
+```
+
+### pnl_daily.jsonl - 日收益统计
+**格式**: JSON Lines，每行一日统计
+
+**字段说明**:
+```json
+{
+  "date": "2025-11-13",              // 交易日期（按tz时区）
+  "pnl": 12.34,                      // 当日已实现PnL
+  "fees": -1.12,                     // 当日手续费总额
+  "turnover": 20345.6,               // 当日成交额
+  "trades": 128,                     // 当日成交笔数
+  "legs": 64,                        // 当日闭合腿数
+  "win_rate": 0.216,                 // 胜率（盈利腿比例）
+  "avg_hold_sec": 142.5              // 平均持仓时间（秒）
+}
+```
+
+### run_manifest.json - 运行清单
+**格式**: 单文件JSON
+
+**字段说明**:
+```json
+{
+  "run_id": "bt_20251113_123456",    // 运行ID
+  "mode": "B",                       // 运行模式（A|B）
+  "symbols": ["BTCUSDT"],            // 交易对列表
+  "start": "2025-11-12T00:00:00Z",   // 开始时间
+  "end": "2025-11-13T00:00:00Z",     // 结束时间
+  "seed": 42,                        // 随机种子
+  "tz": "Asia/Tokyo",                // 时区
+  "config_path": "config/backtest.yaml", // 配置文件路径
+  "features_dir": null,              // 特征目录（模式A）
+  "signals_src": "sqlite://F:/OFICVD/runtime/signals.db", // 信号源（模式B）
+  "output_dir": "./backtest_out",     // 输出目录
+
+  "effective_config": {               // 最终生效配置
+    "heartbeat_interval_s": 60,
+    "fee_bps_maker": -25,
+    "fee_bps_taker": 75,
+    "slippage_bps": 0,
+    "latency_ms": 0,
+    "maker_first": true,
+    "min_order_qty": 0.001,
+    "emit_sqlite": false
+  },
+
+  "env": {                            // 白名单环境变量
+    "BT_FEE_BPS_MAKER": "-25"
+  },
+
+  "git": {                            // Git快照
+    "commit": "72dc377e11a55e984058bf6cba65a3604c574e16",
+    "dirty": true
+  },
+
+  "created_at": "2025-11-13T01:04:03.040283+00:00", // 创建时间
+  "version": "1.0.0",                // 版本号
+
+  "perf": {                           // 性能统计
+    "signals_processed": 291,        // 处理信号数
+    "trades_generated": 169,         // 生成交易数
+    "duration_s": 6.29,              // 运行时长（秒）
+    "avg_rps": 46.28,                // 平均处理速度（行/秒）
+    "memory_gib": 0.397,             // 峰值内存使用（GiB）
+    "price_source": {                 // 价格源信息
+      "price_cache_loaded": 0,       // 加载的symbol数量
+      "price_cache_failure": true,   // 是否加载失败
+      "price_cache_error": "CRITICAL: No price data loaded for any symbol. This will result in unrealistic default prices being used for all trades.",
+      "price_points_total": 0         // 总价格点数
+    }
+  }
+}
+```
+
+**字段约束**:
+- 所有时间戳使用UTC毫秒数
+- 价格使用浮点数（小数点后适当精度）
+- 布尔值使用true/false
+- 数组字段使用[]格式
+- 所有金额使用基础货币单位（非最小单位）
+
+注：字段命名与 Reporter/策略一致，确保"产物可被 Report 服务直接消费"。（承接你的草稿目标。TASK-B2-回测模式（独立运行））
 
 参数与环境对齐
 CLI 参数（建议）
@@ -144,7 +353,9 @@ BT_LATENCY_MS=0..
 
 BT_RISK_INLINE_ENABLED=0|1（与线上布尔风格统一为 0/1）
 
-V13_REPLAY_MODE=1（开启回放宽限护栏；仅影响内部阶段，不破坏“Strategy 仅读 signals”边界）
+BT_FEATURES_PRICE_DIR=./deploy/data/ofi_cvd（价格数据源目录）
+
+V13_REPLAY_MODE=1（开启回放宽限护栏；仅影响内部阶段，不破坏"Strategy 仅读 signals"边界）
 
 规则：CLI 高于 ENV；ENV 高于默认。所有最终生效参数写入 run_manifest.json。
 
@@ -210,7 +421,9 @@ Write-Host "Done: ./backtest_out/$RUN_ID"
 
 切日：--tz 不同导致的 pnl_daily 分桶符合预期；
 
-Schema：字段完整且类型正确，缺失字段 fail-fast。
+Schema：字段完整且类型正确，缺失字段 fail-fast；
+
+价格缓存：模式B价格点数为0时记录CRITICAL错误并在manifest标记。
 
 集成（Integration）
 模式A：2 符号 × 24h，signals/trades/pnl 产出完整；
@@ -242,6 +455,8 @@ Definition of Done（DoD）
  确定性：相同 seed/配置/输入多次运行产物一致（哈希比对）；
 
  观测性：60s 心跳、进度、健康探针可见，run_manifest 含最终生效参数与资源快照；
+
+ 价格质量：模式B自动加载价格缓存，价格点数为0时记录CRITICAL错误并在manifest.price_source中标记；
 
  兼容性：Windows/Linux 均通过 1h 样例窗回测；
 

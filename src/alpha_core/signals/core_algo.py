@@ -696,7 +696,45 @@ class CoreAlgorithm:
         sink_kind: Optional[str] = None,
         output_dir: Optional[str | Path] = None,
     ) -> None:
-        self.config = _merge_dict(DEFAULT_SIGNAL_CONFIG, config or {})
+        raw_cfg = config or {}
+
+        # 如果是"总 config + signal 小节"的风格，则优先使用 signal 小节作为 Core 的配置
+        # 条件：存在 raw_cfg["signal"]，且顶层没有显式传入 weak_signal_threshold / consistency_min 等
+        if (
+            isinstance(raw_cfg, dict)
+            and "signal" in raw_cfg
+            and not any(
+                k in raw_cfg
+                for k in (
+                    "weak_signal_threshold",
+                    "consistency_min",
+                    "consistency_min_per_regime",
+                    "thresholds",
+                    "sink",
+                    "activity",
+                )
+            )
+        ):
+            effective_cfg = dict(raw_cfg["signal"])  # 拿 signal 小节作为 core 的配置起点
+
+            # 把跟 Core 相关的其他段落"抄"进来（strategy_mode / strategy / 版本信息等）
+            for extra_key in ("strategy_mode", "strategy", "rules_ver", "features_ver"):
+                if extra_key in raw_cfg and extra_key not in effective_cfg:
+                    effective_cfg[extra_key] = raw_cfg[extra_key]
+        else:
+            # 兼容旧调用：直接认为整个 config 就是 Core 的配置
+            effective_cfg = raw_cfg
+
+        # 真正生效的配置 = 默认 + 用户覆写
+        self.config = _merge_dict(DEFAULT_SIGNAL_CONFIG, effective_cfg)
+
+        # 临时日志：验证配置生效（用于调试 config["signal"] 生效问题）
+        logger.info(
+            f"[CoreAlgorithm] thresholds: weak={self.config['weak_signal_threshold']}, "
+            f"consistency_min={self.config['consistency_min']}, "
+            f"per_regime={self.config.get('consistency_min_per_regime')}"
+        )
+
         sink_cfg = self.config.get("sink", {})
         base_dir = Path(output_dir or sink_cfg.get("output_dir", "./runtime"))
         
@@ -1219,20 +1257,24 @@ class CoreAlgorithm:
 
     def _resolve_score(self, row: Dict[str, Any]) -> float:
         """解析融合分数
-        
+
         P0修复: 如果recompute_fusion启用，强制重算融合分数
         P1 修复3: 融合分数加温索化/截断（winsorize 或 tanh），减少极值一跳即确认
         """
+        import math  # 导入math模块用于NaN检查
+
         score = row.get("fusion_score")
         if self.recompute_fusion or score is None:
             # 回测端重算融合分数
             w_ofi = self.config["weights"].get("w_ofi", 0.6)
             w_cvd = self.config["weights"].get("w_cvd", 0.4)
             # 处理 None 值（Parquet 文件可能包含 None）
-            z_ofi_val = row.get("z_ofi")
-            z_cvd_val = row.get("z_cvd")
-            ofi = float(z_ofi_val if z_ofi_val is not None else 0.0)
-            cvd = float(z_cvd_val if z_cvd_val is not None else 0.0)
+            # 支持多种字段名格式：z_ofi/z_cvd 或 ofi_z/cvd_z
+            z_ofi_val = row.get("z_ofi") or row.get("ofi_z")
+            z_cvd_val = row.get("z_cvd") or row.get("cvd_z")
+            # 确保转换为float，如果是NaN则使用0.0
+            ofi = float(z_ofi_val) if z_ofi_val is not None and not (isinstance(z_ofi_val, float) and math.isnan(z_ofi_val)) else 0.0
+            cvd = float(z_cvd_val) if z_cvd_val is not None and not (isinstance(z_cvd_val, float) and math.isnan(z_cvd_val)) else 0.0
             
             # P1 修复3: 对 z 值进行 tanh 截断（将极值限制在合理范围内）
             # tanh 函数将输入映射到 (-1, 1)，然后乘以一个缩放因子

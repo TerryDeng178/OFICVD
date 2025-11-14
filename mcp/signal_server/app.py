@@ -191,7 +191,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         sink_kind=args.sink,
         output_dir=args.out,
     )
-
+    
     # TASK-B1 P1: Signal启动固定输出JSON日志套，便于orchestrator提取sink_used
     try:
         sink_health = algo._sink.get_health() if hasattr(algo, '_sink') and algo._sink else {}

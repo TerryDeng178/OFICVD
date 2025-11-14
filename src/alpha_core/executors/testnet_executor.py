@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 class TestnetExecutor(IExecutor):
     """测试网执行器
-
+    
     使用交易所Testnet API，支持dry-run模式
     """
     __test__ = False

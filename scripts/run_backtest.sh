@@ -1,128 +1,204 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
+# -*- coding: utf-8 -*-
+# Backtest Runner Script (Linux/macOS)
+# TASK-B2: Independent Backtest Runner
 
-# TASK-B2: 独立回测运行脚本
-# 用法：
-#   模式A（全量重算）：./run_backtest.sh A ./data/features ./configs/backtest.yaml
-#   模式B（信号复现）：./run_backtest.sh B jsonl://./runtime/signals ./configs/backtest.yaml
+set -e  # Exit on any error
 
-if [ $# -lt 3 ]; then
-    echo "Usage: $0 <mode> <input_src> <config_file> [options]"
-    echo ""
-    echo "Modes:"
-    echo "  A    全量重算模式（features → signals → trades/pnl）"
-    echo "  B    信号复现模式（signals → trades/pnl）"
-    echo ""
-    echo "Input sources:"
-    echo "  Mode A: <features_dir> (e.g., ./data/features)"
-    echo "  Mode B: jsonl://<signals_dir> 或 sqlite://<db_path>"
-    echo ""
-    echo "Examples:"
-    echo "  $0 A ./data/features ./configs/backtest.yaml --symbols BTCUSDT,ETHUSDT"
-    echo "  $0 B jsonl://./runtime/signals ./configs/backtest.yaml --start 2025-11-12T00:00:00Z"
-    exit 1
-fi
+# Function to show usage
+show_usage() {
+    cat << EOF
+TASK-B2: Independent Backtest Runner
 
-MODE="$1"
-INPUT_SRC="$2"
-CONFIG_FILE="$3"
-shift 3
+USAGE:
+    $0 [OPTIONS]
 
-# 生成运行ID
-RUN_ID="bt_$(date +%Y%m%d_%H%M%S)"
+OPTIONS:
+    --mode MODE              Mode: A (features→signals) or B (signals→trades) [required]
+    --features-dir DIR       Features directory for mode A
+    --signals-src SRC        Signals source for mode B (jsonl://path or sqlite://path)
+    --symbols SYMBOLS        Trading symbols (default: BTCUSDT,ETHUSDT,BNBUSDT)
+    --start TIME             Start time (ISO format) [required]
+    --end TIME               End time (ISO format) [required]
+    --config FILE            Config file (default: ./config/backtest.yaml)
+    --out-dir DIR            Output directory (default: ./backtest_out)
+    --run-id ID              Run ID (auto-generated if not specified)
+    --seed INT               Random seed (default: 42)
+    --tz TZ                  Timezone (default: Asia/Tokyo)
+    --emit-sqlite            Emit SQLite signals file
+    --strict-core            Strict CoreAlgorithm mode
+    --reemit-signals         Re-emit signals in mode B
 
-# 设置输入参数
-if [ "$MODE" = "A" ]; then
-    FEATURES_DIR="$INPUT_SRC"
-    SIGNALS_SRC=""
-else
-    FEATURES_DIR=""
-    SIGNALS_SRC="$INPUT_SRC"
-fi
+EXAMPLES:
+    # Mode A: features → signals → trades
+    $0 --mode A --features-dir ./deploy/data/ofi_cvd --symbols BTCUSDT --start 2025-11-08T18:00:00Z --end 2025-11-08T20:00:00Z
 
-# 默认参数
-SYMBOLS="BTCUSDT"
-START_TIME="2025-11-12T00:00:00Z"
-END_TIME="2025-11-13T00:00:00Z"
+    # Mode B: signals → trades
+    $0 --mode B --signals-src sqlite://./runtime/signals.db --symbols BTCUSDT,ETHUSDT --start 2025-11-08T18:00:00Z --end 2025-11-08T20:00:00Z
+
+EOF
+}
+
+# Parse arguments
+MODE=""
+FEATURES_DIR=""
+SIGNALS_SRC=""
+SYMBOLS="BTCUSDT,ETHUSDT,BNBUSDT"
+START=""
+END=""
+CONFIG="./config/backtest.yaml"
+OUT_DIR="./backtest_out"
+RUN_ID=""
 SEED=42
-TIMEZONE="Asia/Tokyo"
+TZ="Asia/Tokyo"
+EMIT_SQLITE=""
+STRICT_CORE=""
+REEMIT_SIGNALS=""
 
-# 解析额外参数
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --mode)
+            MODE="$2"
+            shift 2
+            ;;
+        --features-dir)
+            FEATURES_DIR="$2"
+            shift 2
+            ;;
+        --signals-src)
+            SIGNALS_SRC="$2"
+            shift 2
+            ;;
         --symbols)
             SYMBOLS="$2"
             shift 2
             ;;
         --start)
-            START_TIME="$2"
+            START="$2"
             shift 2
             ;;
         --end)
-            END_TIME="$2"
+            END="$2"
+            shift 2
+            ;;
+        --config)
+            CONFIG="$2"
+            shift 2
+            ;;
+        --out-dir)
+            OUT_DIR="$2"
+            shift 2
+            ;;
+        --run-id)
+            RUN_ID="$2"
             shift 2
             ;;
         --seed)
             SEED="$2"
             shift 2
             ;;
-        --tz|--timezone)
-            TIMEZONE="$2"
+        --tz)
+            TZ="$2"
             shift 2
+            ;;
+        --emit-sqlite)
+            EMIT_SQLITE="--emit-sqlite"
+            shift
+            ;;
+        --strict-core)
+            STRICT_CORE="--strict-core"
+            shift
+            ;;
+        --reemit-signals)
+            REEMIT_SIGNALS="--reemit-signals"
+            shift
+            ;;
+        -h|--help)
+            show_usage
+            exit 0
             ;;
         *)
             echo "Unknown option: $1"
+            show_usage
             exit 1
             ;;
     esac
 done
 
-echo "=== TASK-B2: Independent Backtest Runner ==="
-echo "Run ID: $RUN_ID"
-echo "Mode: $MODE"
-if [ "$MODE" = "A" ]; then
-    echo "Features dir: $FEATURES_DIR"
-else
-    echo "Signals src: $SIGNALS_SRC"
+# Validate required arguments
+if [[ -z "$MODE" ]]; then
+    echo "ERROR: --mode is required"
+    show_usage
+    exit 1
 fi
-echo "Config: $CONFIG_FILE"
-echo "Symbols: $SYMBOLS"
-echo "Time range: $START_TIME to $END_TIME"
-echo "Seed: $SEED"
-echo "Timezone: $TIMEZONE"
-echo ""
 
-# 构建命令
-CMD="python -m backtest.app"
-CMD="$CMD --mode $MODE"
-CMD="$CMD --config $CONFIG_FILE"
-CMD="$CMD --run-id $RUN_ID"
-CMD="$CMD --symbols $SYMBOLS"
-CMD="$CMD --start $START_TIME"
-CMD="$CMD --end $END_TIME"
-CMD="$CMD --seed $SEED"
-CMD="$CMD --tz $TIMEZONE"
+if [[ -z "$START" ]]; then
+    echo "ERROR: --start is required"
+    show_usage
+    exit 1
+fi
 
-if [ "$MODE" = "A" ]; then
+if [[ -z "$END" ]]; then
+    echo "ERROR: --end is required"
+    show_usage
+    exit 1
+fi
+
+if [[ "$MODE" == "A" && -z "$FEATURES_DIR" ]]; then
+    echo "ERROR: --features-dir is required for mode A"
+    show_usage
+    exit 1
+fi
+
+if [[ "$MODE" == "B" && -z "$SIGNALS_SRC" ]]; then
+    echo "ERROR: --signals-src is required for mode B"
+    show_usage
+    exit 1
+fi
+
+# Build command
+CMD="python -m backtest.app --mode $MODE --symbols $SYMBOLS --start $START --end $END --config $CONFIG --out-dir $OUT_DIR --seed $SEED --tz $TZ"
+
+if [[ -n "$FEATURES_DIR" ]]; then
     CMD="$CMD --features-dir $FEATURES_DIR"
-else
+fi
+
+if [[ -n "$SIGNALS_SRC" ]]; then
     CMD="$CMD --signals-src $SIGNALS_SRC"
 fi
 
-# 执行回测
-echo "Executing: $CMD"
-echo ""
+if [[ -n "$RUN_ID" ]]; then
+    CMD="$CMD --run-id $RUN_ID"
+fi
 
-eval "$CMD"
+if [[ -n "$EMIT_SQLITE" ]]; then
+    CMD="$CMD $EMIT_SQLITE"
+fi
 
-# 输出结果路径
-OUTPUT_DIR="./backtest_out/$RUN_ID"
-echo ""
-echo "=== Backtest completed ==="
-echo "Output directory: $OUTPUT_DIR"
-echo ""
-echo "Generated files:"
-ls -la "$OUTPUT_DIR" 2>/dev/null || echo "Output directory not found"
+if [[ -n "$STRICT_CORE" ]]; then
+    CMD="$CMD $STRICT_CORE"
+fi
 
-echo ""
-echo "Done: $RUN_ID"
+if [[ -n "$REEMIT_SIGNALS" ]]; then
+    CMD="$CMD $REEMIT_SIGNALS"
+fi
+
+# Execute
+echo "=========================================="
+echo "TASK-B2: Independent Backtest Runner"
+echo "=========================================="
+echo "Command: $CMD"
+echo "=========================================="
+
+eval $CMD
+
+if [[ $? -eq 0 ]]; then
+    echo "=========================================="
+    echo "Backtest completed successfully!"
+    echo "=========================================="
+else
+    echo "=========================================="
+    echo "Backtest failed with exit code: $?"
+    echo "=========================================="
+    exit 1
+fi

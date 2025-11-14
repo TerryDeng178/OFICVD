@@ -1,93 +1,121 @@
-# TASK-B2: 独立回测运行脚本 (PowerShell版本)
-# 用法：
-#   模式A（全量重算）：.\run_backtest.ps1 A .\data\features .\configs\backtest.yaml
-#   模式B（信号复现）：.\run_backtest.ps1 B jsonl://.\runtime\signals .\configs\backtest.yaml
+# -*- coding: utf-8 -*-
+# Backtest Runner Script (Windows PowerShell)
+# TASK-B2: Independent Backtest Runner
 
 param(
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory=$false)]
     [ValidateSet("A", "B")]
     [string]$Mode,
 
-    [Parameter(Mandatory=$true)]
-    [string]$InputSrc,
+    [Parameter(Mandatory=$false)]
+    [string]$FeaturesDir,
 
-    [Parameter(Mandatory=$true)]
-    [string]$ConfigFile,
+    [Parameter(Mandatory=$false)]
+    [string]$SignalsSrc,
 
-    [string]$Symbols = "BTCUSDT",
-    [string]$StartTime = "2025-11-12T00:00:00Z",
-    [string]$EndTime = "2025-11-13T00:00:00Z",
+    [Parameter(Mandatory=$false)]
+    [string]$Symbols = "BTCUSDT,ETHUSDT,BNBUSDT",
+
+    [Parameter(Mandatory=$false)]
+    [string]$Start,
+
+    [Parameter(Mandatory=$false)]
+    [string]$End,
+
+    [Parameter(Mandatory=$false)]
+    [string]$Config = "./config/backtest.yaml",
+
+    [Parameter(Mandatory=$false)]
+    [string]$OutDir = "./backtest_out",
+
+    [Parameter(Mandatory=$false)]
+    [string]$RunId,
+
+    [Parameter(Mandatory=$false)]
     [int]$Seed = 42,
-    [string]$Timezone = "Asia/Tokyo"
+
+    [Parameter(Mandatory=$false)]
+    [string]$Tz = "Asia/Tokyo",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$EmitSqlite,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$StrictCore,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$ReemitSignals
 )
 
-# 生成运行ID
-$RUN_ID = "bt_{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss")
+# Build command arguments
+$args = @()
 
-# 设置输入参数
-if ($Mode -eq "A") {
-    $FeaturesDir = $InputSrc
-    $SignalsSrc = ""
-} else {
-    $FeaturesDir = ""
-    $SignalsSrc = $InputSrc
+if ($Mode) {
+    $args += "--mode", $Mode
 }
 
-Write-Host "=== TASK-B2: Independent Backtest Runner ===" -ForegroundColor Cyan
-Write-Host "Run ID: $RUN_ID"
-Write-Host "Mode: $Mode"
-if ($Mode -eq "A") {
-    Write-Host "Features dir: $FeaturesDir"
-} else {
-    Write-Host "Signals src: $SignalsSrc"
-}
-Write-Host "Config: $ConfigFile"
-Write-Host "Symbols: $Symbols"
-Write-Host "Time range: $StartTime to $EndTime"
-Write-Host "Seed: $Seed"
-Write-Host "Timezone: $Timezone"
-Write-Host ""
-
-# 构建命令
-$cmd = "python -m backtest.app"
-$cmd += " --mode $Mode"
-$cmd += " --config `"$ConfigFile`""
-$cmd += " --run-id $RUN_ID"
-$cmd += " --symbols $Symbols"
-$cmd += " --start $StartTime"
-$cmd += " --end $EndTime"
-$cmd += " --seed $Seed"
-$cmd += " --tz $Timezone"
-
-if ($Mode -eq "A") {
-    $cmd += " --features-dir `"$FeaturesDir`""
-} else {
-    $cmd += " --signals-src `"$SignalsSrc`""
+if ($FeaturesDir) {
+    $args += "--features-dir", $FeaturesDir
 }
 
-# 执行回测
-Write-Host "Executing: $cmd" -ForegroundColor Yellow
-Write-Host ""
+if ($SignalsSrc) {
+    $args += "--signals-src", $SignalsSrc
+}
 
-# 执行命令
-Invoke-Expression $cmd
+$args += "--symbols", $Symbols
 
-# 输出结果路径
-$outputDir = "./backtest_out/$RUN_ID"
-Write-Host ""
-Write-Host "=== Backtest completed ===" -ForegroundColor Green
-Write-Host "Output directory: $outputDir"
-Write-Host ""
+if ($Start) {
+    $args += "--start", $Start
+}
 
-# 检查输出文件
-if (Test-Path $outputDir) {
-    Write-Host "Generated files:"
-    Get-ChildItem $outputDir | ForEach-Object {
-        Write-Host "  $($_.Name) ($("{0:N0}" -f $_.Length) bytes)"
+if ($End) {
+    $args += "--end", $End
+}
+
+$args += "--config", $Config
+$args += "--out-dir", $OutDir
+
+if ($RunId) {
+    $args += "--run-id", $RunId
+}
+
+$args += "--seed", $Seed.ToString()
+$args += "--tz", $Tz
+
+if ($EmitSqlite) {
+    $args += "--emit-sqlite"
+}
+
+if ($StrictCore) {
+    $args += "--strict-core"
+}
+
+if ($ReemitSignals) {
+    $args += "--reemit-signals"
+}
+
+# Execute backtest
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host "TASK-B2: Independent Backtest Runner" -ForegroundColor Cyan
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host "Command: python -m backtest.app $($args -join ' ')" -ForegroundColor Yellow
+Write-Host "==========================================" -ForegroundColor Cyan
+
+try {
+    & python -m backtest.app @args
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "==========================================" -ForegroundColor Green
+        Write-Host "Backtest completed successfully!" -ForegroundColor Green
+        Write-Host "==========================================" -ForegroundColor Green
+    } else {
+        Write-Host "==========================================" -ForegroundColor Red
+        Write-Host "Backtest failed with exit code: $LASTEXITCODE" -ForegroundColor Red
+        Write-Host "==========================================" -ForegroundColor Red
+        exit $LASTEXITCODE
     }
-} else {
-    Write-Host "Warning: Output directory not found" -ForegroundColor Yellow
+} catch {
+    Write-Host "==========================================" -ForegroundColor Red
+    Write-Host "Error executing backtest: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "==========================================" -ForegroundColor Red
+    exit 1
 }
-
-Write-Host ""
-Write-Host "Done: $RUN_ID" -ForegroundColor Green

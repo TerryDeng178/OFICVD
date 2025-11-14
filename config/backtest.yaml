@@ -8,8 +8,15 @@ signal:
   output_dir: ./runtime
   replay_mode: 1  # Always 1 for backtest
   # 信号生成参数（用于优化器参数覆盖）
-  weak_signal_threshold: 0.2  # 弱信号阈值
-  consistency_min: 0.15  # 最小一致性要求
+  weak_signal_threshold: 0.15  # 弱信号阈值 (从0.2下调，开始调优)
+  consistency_min: 0.05  # 最小一致性要求 (从0.15下调，开始调优)
+  consistency_min_per_regime:
+    active: 0.05  # 活跃模式一致性阈值
+    quiet: 0.08   # 静默模式一致性阈值
+  # min_consecutive_same_dir: 3  # 最小连续同向要求 (F1 Trial 5最优参数)
+  # dedupe_ms: 8000  # 信号去重窗口 (F1 Trial 5最优参数)
+  # 方向决策阈值：score绝对值需要超过此值才能用于方向判断
+  min_abs_score_for_side: 0.0  # 默认0.0，允许任何非零score决定方向
   thresholds:
     active:
       buy: 0.5  # Active模式买入阈值
@@ -22,6 +29,7 @@ components:
     # 融合参数（用于优化器参数覆盖）
     adaptive_cooldown_k: 0.6  # 自适应冷却系数
     flip_rearm_margin: 0.05  # 方向翻转重臂余量
+    min_consecutive: 3  # 最小连续融合要求 (F1 Trial 5最优参数)
   cvd:
     winsor_limit: 2.0
 
@@ -31,6 +39,9 @@ strategy:
   direction: both           # both | long_only | short_only
   entry_threshold: 0.0      # 融合信号阈值（按你融合信号口径自行设定）
   exit_threshold: 0.0       # 退出信号阈值（按你融合信号口径自行设定）
+
+execution:
+  cooldown_ms: 500  # 执行冷却时间 (F1 Trial 5最优参数)
 
 risk:
   # 整体仓位与回撤口径（用于 TradeSim/聚合指标统一风控上限）
@@ -129,6 +140,13 @@ backtest:
       sell: 0.8  # 卖出更容易taker
     # Maker费率相对taker的比率（默认0.5，即maker费率是taker的一半）
     maker_fee_ratio: 0.5
+
+# Data source configuration
+data:
+  # 价格数据源目录（用于回测时的价格查询）
+  # 支持ready格式: deploy/data/ofi_cvd/ready/features/{SYMBOL}/features*.jsonl
+  # 支持preview格式: deploy/data/ofi_cvd/preview/date=*/hour=*/symbol=*/kind=features/*.parquet
+  features_price_dir: "deploy/data/ofi_cvd"
 
 # Input/output paths
 paths:

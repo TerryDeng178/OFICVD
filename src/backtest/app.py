@@ -11,6 +11,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -42,6 +43,389 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def is_tradeable(signal: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+    """判断信号是否可以交易
+
+    Args:
+        signal: 信号字典
+
+    Returns:
+        (can_trade, reason): can_trade为True表示可以交易，reason为不可交易的原因
+    """
+    gating = signal.get("gating", [])
+    confirm = signal.get("confirm", False)
+
+    # 规则1: gating非空，一律不可交易
+    if gating:
+        return False, f"gating: {gating}"
+
+    # 规则2: confirm为False，不可交易
+    if not confirm:
+        return False, "confirm_false"
+
+    # 规则3: gating为空且confirm=True，可以交易
+    return True, None
+
+
+def resolve_features_price_dir(cli_features_price_dir: Optional[str] = None,
+                               config: Optional[Dict[str, Any]] = None) -> Path:
+    """解析features价格目录，按优先级：CLI > ENV > config > 默认值
+
+    Args:
+        cli_features_price_dir: CLI参数--features-price-dir的值
+        config: 加载的YAML配置字典
+
+    Returns:
+        最终解析的价格数据根目录路径
+    """
+    # 优先级1: CLI参数最高优先级
+    if cli_features_price_dir:
+        resolved_path = Path(cli_features_price_dir)
+        logger.info(f"Using features-price-dir from CLI: {resolved_path}")
+        return resolved_path
+
+    # 优先级2: 环境变量
+    env_dir = os.getenv("BT_FEATURES_PRICE_DIR")
+    if env_dir:
+        resolved_path = Path(env_dir)
+        logger.info(f"Using features-price-dir from ENV BT_FEATURES_PRICE_DIR: {resolved_path}")
+        return resolved_path
+
+    # 优先级3: 配置文件
+    if config:
+        config_dir = config.get("data", {}).get("features_price_dir")
+        if config_dir:
+            resolved_path = Path(config_dir)
+            logger.info(f"Using features-price-dir from config: {resolved_path}")
+            return resolved_path
+
+    # 默认值兜底
+    default_path = Path("deploy/data/ofi_cvd")
+    logger.info(f"Using default features-price-dir: {default_path}")
+    return default_path
+
+
+class StrategyEmulator:
+    """策略仿真器：统一处理信号的策略决策逻辑
+
+    负责将信号转换为交易决策，包括：
+    - 判断信号是否可交易 (gating/confirm检查)
+    - 确定交易方向 (signal_type/side_hint/score决策)
+    - 策略相关的其他决策逻辑
+
+    这个类确保回测和实盘使用相同的决策逻辑，避免drift。
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """初始化策略仿真器
+
+        Args:
+            config: 配置字典，包含min_abs_score_for_side等参数
+        """
+        self.config = config or {}
+
+    def decide_side(self, signal: Dict[str, Any]) -> Optional[str]:
+        """根据信号决定交易方向
+
+        决策顺序：
+        1. signal_type (buy/strong_buy/sell/strong_sell)
+        2. side_hint (BUY/LONG/BULLISH/SELL/SHORT/BEARISH)
+        3. score 正负号（如果绝对值超过阈值）
+
+        Args:
+            signal: 信号字典
+
+        Returns:
+            "BUY", "SELL" 或 None
+        """
+        # 从配置读取阈值，默认0.0
+        min_abs_score = self.config.get("signal", {}).get("min_abs_score_for_side", 0.0)
+
+        # 1. 优先检查signal_type
+        st = (signal.get("signal_type") or "").lower()
+        if st in ("buy", "strong_buy"):
+            return "BUY"
+        elif st in ("sell", "strong_sell"):
+            return "SELL"
+
+        # 2. 检查side_hint
+        side_hint = (signal.get("side_hint") or "").upper()
+        if side_hint in ("BUY", "LONG", "BULLISH"):
+            return "BUY"
+        elif side_hint in ("SELL", "SHORT", "BEARISH"):
+            return "SELL"
+
+        # 3. 检查score
+        score = signal.get("score")
+        if isinstance(score, (int, float)) and abs(score) > min_abs_score:
+            return "BUY" if score > 0 else "SELL"
+
+        # 无法判定方向
+        return None
+
+    def should_trade(self, signal: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+        """判断信号是否应该交易
+
+        使用统一的is_tradeable函数进行判断。
+
+        Args:
+            signal: 信号字典
+
+        Returns:
+            (should_trade, reason): should_trade为True表示应该交易，reason为不交易的原因
+        """
+        return is_tradeable(signal)
+
+
+class PriceCache:
+    """价格缓存：支持preview/ready双格式自动探测及窗口加载"""
+
+    def __init__(self, root_dir: Path, symbols: set, start_ms: Optional[int] = None,
+                 end_ms: Optional[int] = None, config: Optional[Dict[str, Any]] = None):
+        """初始化价格缓存
+
+        Args:
+            root_dir: 价格数据根目录 (features_price_dir)
+            symbols: 需要加载价格的交易对集合
+            start_ms: 时间窗口开始时间戳(毫秒)
+            end_ms: 时间窗口结束时间戳(毫秒)
+            config: 配置字典，用于读取price.fields等配置
+        """
+        self.root_dir = root_dir
+        self.symbols = symbols
+        self.start_ms = start_ms
+        self.end_ms = end_ms
+        self.config = config or {}
+
+        # 价格缓存: symbol -> sorted list of (ts_ms, price)
+        self._cache = {}
+        self._loaded = False
+
+        # 质量检查标志
+        self._failure = False
+        self._error_msg = None
+
+        # 配置：价格字段优先级
+        self.price_fields = self.config.get("price", {}).get("fields", ["mid_px", "price"])
+
+    def load(self) -> Dict[str, Any]:
+        """加载价格缓存，返回质量报告"""
+        if self._loaded:
+            return self._get_quality_report()
+
+        logger.info("Loading price cache...")
+
+        try:
+            # 自动探测格式：preview优先
+            if (self.root_dir / "preview").exists():
+                self._load_preview_format()
+            elif (self.root_dir / "ready").exists():
+                self._load_ready_format()
+            else:
+                self._failure = True
+                self._error_msg = f"Neither preview nor ready format found in {self.root_dir}"
+                logger.warning(self._error_msg)
+
+            self._loaded = True
+
+            # fail-fast检查
+            total_points = sum(len(prices) for prices in self._cache.values())
+            if total_points == 0:
+                self._failure = True
+                self._error_msg = "CRITICAL: No price data loaded for any symbol. This will result in unrealistic default prices being used for all trades."
+                logger.error(self._error_msg)
+
+            return self._get_quality_report()
+
+        except Exception as e:
+            self._failure = True
+            self._error_msg = f"Failed to load price cache: {e}"
+            logger.error(self._error_msg)
+            return self._get_quality_report()
+
+    def lookup(self, symbol: str, ts_ms: int) -> Optional[float]:
+        """查找指定时间点的价格（使用二分查找）"""
+        symbol_prices = self._cache.get(symbol.upper())
+        if not symbol_prices:
+            return None
+
+        # 二分查找最接近的时间点
+        from bisect import bisect_left
+        idx = bisect_left(symbol_prices, (ts_ms,), key=lambda x: x[0])
+
+        if idx == 0:
+            # 第一个点之前，返回None或第一个点
+            return symbol_prices[0][1] if symbol_prices else None
+        elif idx >= len(symbol_prices):
+            # 最后一个点之后，返回最后一个点
+            return symbol_prices[-1][1]
+        else:
+            # 在两个点之间，选择更接近的一个
+            prev_ts, prev_price = symbol_prices[idx - 1]
+            curr_ts, curr_price = symbol_prices[idx]
+
+            if abs(ts_ms - prev_ts) <= abs(ts_ms - curr_ts):
+                return prev_price
+            else:
+                return curr_price
+
+    def _get_quality_report(self) -> Dict[str, Any]:
+        """生成质量报告"""
+        total_points = sum(len(prices) for prices in self._cache.values())
+
+        return {
+            "price_cache_loaded": total_points,
+            "price_cache_failure": self._failure,
+            "price_cache_error": self._error_msg,
+            "price_points_total": total_points,
+            "symbols_loaded": list(self._cache.keys())
+        }
+
+    def _load_ready_format(self):
+        """加载ready格式价格数据"""
+        features_base = self.root_dir / "ready" / "features"
+        logger.info(f"Loading ready format from {features_base}")
+
+        for symbol in self.symbols:
+            symbol_cache = []
+            symbol_dir = features_base / symbol.upper()
+
+            if not symbol_dir.exists():
+                logger.warning(f"Features directory not found for {symbol}: {symbol_dir}")
+                continue
+
+            # 读取该symbol的所有features文件
+            import glob
+            pattern = str(symbol_dir / "features*.jsonl")
+            feature_files = glob.glob(pattern)
+
+            for file_path in sorted(feature_files):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+
+                            feature = json.loads(line)
+                            ts_ms = int(feature.get('ts_ms', 0))
+
+                            # 按优先级查找价格字段
+                            price = None
+                            for field in self.price_fields:
+                                if field in feature and feature[field]:
+                                    price = float(feature[field])
+                                    break
+
+                            if ts_ms > 0 and price and price > 0:
+                                # 时间窗口过滤
+                                if (self.start_ms is None or ts_ms >= self.start_ms) and \
+                                   (self.end_ms is None or ts_ms < self.end_ms):
+                                    symbol_cache.append((ts_ms, price))
+
+                except Exception as e:
+                    logger.warning(f"Error reading features file {file_path}: {e}")
+
+            # 排序并存储
+            if symbol_cache:
+                symbol_cache.sort(key=lambda x: x[0])
+                self._cache[symbol.upper()] = symbol_cache
+                logger.info(f"Loaded {len(symbol_cache)} price points from ready format for {symbol}")
+
+    def _load_preview_format(self):
+        """加载preview格式价格数据"""
+        logger.info(f"Loading preview format from {self.root_dir}")
+        try:
+            import pyarrow.parquet as pq
+        except ImportError:
+            logger.error("pyarrow not available for preview format")
+            return
+
+        for symbol in self.symbols:
+            symbol_cache = []
+            symbol_lower = symbol.lower()
+
+            # 遍历所有日期目录
+            preview_dir = self.root_dir / "preview"
+            if not preview_dir.exists():
+                continue
+
+            date_dirs = list(preview_dir.glob("date=*"))
+            for date_dir in sorted(date_dirs):
+                if not date_dir.is_dir():
+                    continue
+
+                # 遍历所有小时目录
+                for hour_dir in sorted(date_dir.glob("hour=*")):
+                    if not hour_dir.is_dir():
+                        continue
+
+                    # 查找对应的symbol目录
+                    symbol_dir = hour_dir / f"symbol={symbol_lower}"
+                    if not symbol_dir.exists():
+                        continue
+
+                    # 查找features目录
+                    features_dir = symbol_dir / "kind=features"
+                    if not features_dir.exists():
+                        continue
+
+                    # 读取该目录下的所有parquet文件
+                    parquet_files = list(features_dir.glob("*.parquet"))
+                    for parquet_file in sorted(parquet_files):
+                        try:
+                            # 读取parquet文件（跳过schema不一致的文件）
+                            try:
+                                table = pq.read_table(parquet_file)
+                                df = table.to_pandas()
+                            except Exception as schema_error:
+                                logger.warning(f"Skipping {parquet_file.name}: schema error - {schema_error}")
+                                continue
+
+                            # 检查必要的列是否存在
+                            if 'ts_ms' not in df.columns:
+                                logger.warning(f"Skipping {parquet_file.name}: missing ts_ms column")
+                                continue
+
+                            # 检查是否有价格列
+                            price_col = None
+                            for field in self.price_fields:
+                                if field in df.columns:
+                                    price_col = field
+                                    break
+
+                            if not price_col:
+                                logger.warning(f"Skipping {parquet_file.name}: no price columns found in {self.price_fields}")
+                                continue
+
+                            # 时间和价格过滤
+                            mask = (
+                                (df['ts_ms'] > 0) &
+                                (df[price_col].notna()) &
+                                (df[price_col] > 0)
+                            )
+
+                            # 时间窗口过滤
+                            if self.start_ms is not None:
+                                mask &= (df['ts_ms'] >= self.start_ms)
+                            if self.end_ms is not None:
+                                mask &= (df['ts_ms'] < self.end_ms)
+
+                            filtered_df = df[mask]
+                            if len(filtered_df) > 0:
+                                for _, row in filtered_df.iterrows():
+                                    symbol_cache.append((int(row['ts_ms']), float(row[price_col])))
+
+                        except Exception as e:
+                            logger.warning(f"Error reading parquet file {parquet_file}: {e}")
+
+            # 排序并存储
+            if symbol_cache:
+                symbol_cache.sort(key=lambda x: x[0])
+                self._cache[symbol.upper()] = symbol_cache
+                logger.info(f"Loaded {len(symbol_cache)} price points from preview format for {symbol}")
+
+
 class BacktestAdapter:
     """回测数据适配器：支持features目录和signals源的流式读取"""
 
@@ -49,7 +433,9 @@ class BacktestAdapter:
                  signals_src: Optional[str] = None, symbols: Optional[set] = None,
                  start_ms: Optional[int] = None, end_ms: Optional[int] = None,
                  strict_core: bool = False, run_id: str = "unknown",
-                 config: Optional[Dict[str, Any]] = None):
+                 config: Optional[Dict[str, Any]] = None,
+                 cli_features_price_dir: Optional[str] = None,
+                 consistency_qa_mode: bool = False):
         if mode not in ['A', 'B']:
             raise ValueError(f"Invalid mode: {mode}. Must be 'A' or 'B'")
 
@@ -65,8 +451,65 @@ class BacktestAdapter:
         self.start_ms = start_ms
         self.end_ms = end_ms
         self.strict_core = strict_core
+
+        # 价格缓存：使用新的PriceCache类
+        self._price_cache = None  # PriceCache实例
+        self._price_cache_loaded = False
+        # 价格缓存质量检查标志
+        self._price_cache_failure = False
+        self._price_cache_error_msg = None
+        self._cli_features_price_dir = cli_features_price_dir  # CLI价格目录参数
         self.run_id = run_id
         self.config = config or {}
+        self.consistency_qa_mode = consistency_qa_mode
+
+    def _load_price_cache(self):
+        """加载价格缓存：使用PriceCache类"""
+        if self._price_cache_loaded or self.mode != 'B':
+            return
+
+        logger.info("Loading price cache...")
+
+        try:
+            # 获取features价格目录（通过resolve_features_price_dir处理优先级）
+            price_dir = resolve_features_price_dir(
+                cli_features_price_dir=self._cli_features_price_dir,
+                config=self.config
+            )
+
+            # 初始化PriceCache
+            self._price_cache = PriceCache(
+                root_dir=price_dir,
+                symbols=self.symbols,
+                start_ms=self.start_ms,
+                end_ms=self.end_ms,
+                config=self.config
+            )
+
+            # 加载价格数据并获取质量报告
+            quality_report = self._price_cache.load()
+
+            self._price_cache_loaded = True
+            self._price_cache_failure = quality_report.get("price_cache_failure", False)
+            self._price_cache_error_msg = quality_report.get("price_cache_error")
+
+            logger.info(f"Price cache loaded: {quality_report.get('price_points_total', 0)} points for {len(quality_report.get('symbols_loaded', []))} symbols")
+
+        except Exception as e:
+            logger.error(f"Failed to load price cache: {e}")
+            self._price_cache_failure = True
+            self._price_cache_error_msg = str(e)
+
+
+    def get_price_at_time(self, symbol: str, ts_ms: int) -> Optional[float]:
+        """在指定时间点获取最接近的价格"""
+        if not self._price_cache_loaded:
+            self._load_price_cache()
+
+        if self._price_cache is None:
+            return None
+
+        return self._price_cache.lookup(symbol, ts_ms)
 
     def iter_features(self) -> Iterator[Dict[str, Any]]:
         """模式A：流式读取features数据"""
@@ -162,8 +605,30 @@ class BacktestAdapter:
                 core_import_success = False
                 CoreAlgorithm = None  # 设为None以便后续检查
 
-            for feature_row in self.iter_features():
+            processed_rows = 0
+            # 添加全局统计计数器
+            total_no_signal_rows = 0
+            total_fallback_import = 0
+            total_fallback_exception = 0
+            total_real_signals = 0
+
+            # QA模式：收集真实信号用于一致性分布分析
+            qa_signals = []
+
+            logger.info(f"[DEBUG] Starting to process features, core_import_success={core_import_success}")
+            features_iter = self.iter_features()
+            logger.info(f"[DEBUG] Created features iterator: {features_iter}")
+            for feature_row in features_iter:
                 symbol = feature_row["symbol"]
+                processed_rows += 1
+                if processed_rows % 1000 == 0:
+                    logger.info(f"[DEBUG] Processed {processed_rows} rows")
+                if processed_rows == 1:  # 只在第一行显示一次
+                    logger.info(f"[DEBUG] First feature_row: symbol={symbol}, ts_ms={feature_row.get('ts_ms')}")
+                    logger.info(f"[DEBUG] First feature_row keys: {list(feature_row.keys())}")
+                    logger.info(f"[DEBUG] First feature_row z_ofi: {feature_row.get('z_ofi')}")
+                    logger.info(f"[DEBUG] First feature_row z_cvd: {feature_row.get('z_cvd')}")
+                    logger.info(f"[DEBUG] First feature_row fusion_score: {feature_row.get('fusion_score')}")
 
                 # 为每个symbol初始化CoreAlgorithm（如果还没有）
                 if symbol not in algos:
@@ -187,25 +652,88 @@ class BacktestAdapter:
                 algo = algos[symbol]
 
                 # 调用真实CoreAlgorithm进行信号计算
-                # 这里假设CoreAlgorithm有一个feed_and_get_signals方法
-                # 如果实际接口不同，需要相应调整
+
+                # 存储当前处理的行信息，用于异常日志
+                current_row_info = {
+                    "ts_ms": feature_row.get("ts_ms"),
+                    "symbol": feature_row.get("symbol"),
+                    "z_ofi": feature_row.get("z_ofi"),
+                    "ofi_z": feature_row.get("ofi_z"),
+                    "z_cvd": feature_row.get("z_cvd"),
+                    "cvd_z": feature_row.get("cvd_z"),
+                    "fusion_score": feature_row.get("fusion_score"),
+                    "consistency": feature_row.get("consistency"),
+                    "regime": feature_row.get("regime"),
+                    "scenario_2x2": feature_row.get("scenario_2x2")
+                }
+
                 if algo is None:
                     # 导入失败，走fallback逻辑
                     fallback_reason = "CoreAlgorithm import failed"
+                    total_fallback_import += 1
                 else:
                     try:
-                        # 将feature_row转换为CoreAlgorithm期望的格式
-                        signals = algo.feed_and_get_signals(feature_row)
+                        # 调用CoreAlgorithm的process_feature_row方法
+                        logger.debug(f"[DEBUG] Calling CoreAlgorithm.process_feature_row for {symbol}")
+                        signal = algo.process_feature_row(feature_row)
+                        logger.debug(f"[DEBUG] CoreAlgorithm returned: {signal is not None}")
 
-                        for signal in signals:
-                            # 确保契约要求的字段格式
-                            signal["gating"] = signal.get("gating", [])  # 确保为数组
-                            signal["confirm"] = bool(signal.get("confirm", False))
-                            yield signal
+                        if signal is None:
+                            # ✅ 正常情况：这行feature没有产生信号，直接跳过
+                            total_no_signal_rows += 1
+                            continue
+
+                        # ✅ 真正的信号路径：处理gating和价格注入
+                        total_real_signals += 1
+
+                        # 修复 gating 语义：使用 gating_blocked / decision_reason 来生成列表
+                        gating_blocked = signal.get("gating_blocked", False)
+                        reason = signal.get("decision_reason") or signal.get("gate_reason") or signal.get("guard_reason")
+
+                        if gating_blocked:
+                            if reason:
+                                # 多个 reason 用逗号分隔，转为列表
+                                signal["gating"] = [r.strip() for r in reason.split(",") if r.strip()]
+                            else:
+                                signal["gating"] = ["guarded"]
+                        else:
+                            signal["gating"] = []  # 通过护栏
+
+                        signal["confirm"] = bool(signal.get("confirm", False))
+
+                        # 从 feature_row 注入价格字段，供 Mode A 下单使用
+                        for price_field in ("mid_px", "price", "mid"):
+                            if price_field in feature_row and price_field not in signal:
+                                signal[price_field] = feature_row[price_field]
+
+                        # QA模式：收集信号用于一致性分布分析
+                        qa_signals.append({
+                            'score': signal.get('score'),
+                            'consistency': feature_row.get('consistency'),
+                            'z_ofi': feature_row.get('z_ofi') or feature_row.get('ofi_z'),
+                            'z_cvd': feature_row.get('z_cvd') or feature_row.get('cvd_z'),
+                            'gating': signal.get('gating', []),
+                            'confirm': signal.get('confirm', False)
+                        })
+
+                        logger.debug(f"[DEBUG] Signal score: {signal.get('score')}, confirm: {signal.get('confirm')}, gating: {signal.get('gating')}")
+                        logger.debug(f"[DEBUG] Yielding real signal for {symbol}: confirm={signal.get('confirm')}, gating={signal.get('gating')}")
+                        yield signal
                         continue  # 成功处理，跳过fallback
 
                     except Exception as e:
-                        fallback_reason = str(e)
+                        fallback_reason = f"CoreAlgorithm exception: {e}"
+                        total_fallback_exception += 1
+
+                        # 只对前20个异常打详细日志，避免日志爆炸
+                        if total_fallback_exception <= 20:
+                            logger.exception(
+                                "[BACKTEST] CoreAlgorithm exception #%d on row: ts_ms=%s symbol=%s raw_data=%s",
+                                total_fallback_exception,
+                                current_row_info.get("ts_ms"),
+                                current_row_info.get("symbol"),
+                                current_row_info
+                            )
 
                 # 走到这里说明需要fallback
                 # 如果真实计算失败，根据strict_core决定行为
@@ -227,6 +755,64 @@ class BacktestAdapter:
                     "run_id": self.run_id
                 }
 
+            # 输出处理统计信息
+            logger.info(
+                f"[SUMMARY] Processed {processed_rows} feature rows: "
+                f"no_signal_rows={total_no_signal_rows}, "
+                f"real_signals={total_real_signals}, "
+                f"fallback_import={total_fallback_import}, "
+                f"fallback_exception={total_fallback_exception}"
+            )
+
+            # 如果启用了QA模式，做一致性分布统计
+            if getattr(self, 'consistency_qa_mode', False):
+                consistency_buckets = {
+                    '< 0.00': 0,
+                    '[0.00, 0.05)': 0,
+                    '[0.05, 0.10)': 0,
+                    '[0.10, 0.15)': 0,
+                    '[0.15, 0.20)': 0,
+                    '>= 0.20': 0
+                }
+                weak_signal_count = 0
+                low_consistency_count = 0
+                passed_signals = 0
+
+                for signal in qa_signals:
+                    # 一致性分布统计
+                    consistency = signal.get('consistency')
+                    if consistency is not None:
+                        if consistency < 0.0:
+                            consistency_buckets['< 0.00'] += 1
+                        elif consistency < 0.05:
+                            consistency_buckets['[0.00, 0.05)'] += 1
+                        elif consistency < 0.10:
+                            consistency_buckets['[0.05, 0.10)'] += 1
+                        elif consistency < 0.15:
+                            consistency_buckets['[0.10, 0.15)'] += 1
+                        elif consistency < 0.20:
+                            consistency_buckets['[0.15, 0.20)'] += 1
+                        else:
+                            consistency_buckets['>= 0.20'] += 1
+
+                    # 弱信号和低一致性统计
+                    gating = signal.get('gating', [])
+                    if 'weak_signal' in gating:
+                        weak_signal_count += 1
+                    if 'low_consistency' in gating:
+                        low_consistency_count += 1
+                    if not gating and signal.get('confirm', False):
+                        passed_signals += 1
+
+                logger.info("[CONSISTENCY_QA] Real signals distribution:")
+                logger.info(f"  Total real signals: {len(qa_signals)}")
+                for bucket, count in consistency_buckets.items():
+                    if count > 0:
+                        logger.info(f"  Consistency {bucket}: {count} ({count/len(qa_signals)*100:.1f}%)")
+                logger.info(f"  Weak signal gated: {weak_signal_count} ({weak_signal_count/len(qa_signals)*100:.1f}%)")
+                logger.info(f"  Low consistency gated: {low_consistency_count} ({low_consistency_count/len(qa_signals)*100:.1f}%)")
+                logger.info(f"  Passed all gates: {passed_signals} ({passed_signals/len(qa_signals)*100:.1f}%)")
+
         finally:
             # 清理临时目录
             for temp_dir in temp_dirs.values():
@@ -241,16 +827,74 @@ class BacktestAdapter:
             signals_dir = Path(self.signals_src[8:])  # Remove "jsonl://" prefix
             yield from self._iter_signals_jsonl(signals_dir)
         elif self.signals_src.startswith("sqlite://"):
-            db_path = Path(self.signals_src[9:])  # Remove "sqlite://" prefix
+            db_path_str = self.signals_src[9:]  # Remove "sqlite://" prefix
+            # 解析相对路径为绝对路径
+            db_path = Path(db_path_str).absolute()
             yield from self._iter_signals_sqlite(db_path)
         else:
             raise ValueError(f"Unsupported signals_src format: {self.signals_src}")
 
+    def validate_signals_data_quality(self) -> Dict[str, Any]:
+        """验证signals源数据质量，返回质量报告"""
+        quality_report = {
+            "total_signals": 0,
+            "timestamp_monotonic": True,
+            "violations": []
+        }
+
+        # 收集所有信号进行验证
+        all_signals = list(self._iter_signals_from_source())
+        quality_report["total_signals"] = len(all_signals)
+
+        if not all_signals:
+            return quality_report
+
+        # 验证时间戳单调递增
+        prev_ts = None
+        violations = []
+
+        for i, signal in enumerate(all_signals):
+            ts = signal.get("ts_ms")
+            if ts is None:
+                violations.append({
+                    "type": "missing_timestamp",
+                    "index": i,
+                    "signal": signal
+                })
+                continue
+
+            if prev_ts is not None and ts < prev_ts:
+                violations.append({
+                    "type": "timestamp_violation",
+                    "index": i,
+                    "ts_ms": ts,
+                    "prev_ts_ms": prev_ts,
+                    "diff_ms": ts - prev_ts
+                })
+                quality_report["timestamp_monotonic"] = False
+
+            prev_ts = ts
+
+        quality_report["violations"] = violations
+
+        if violations:
+            logger.warning(f"DATA QUALITY ISSUE: {len(violations)} data quality violations found")
+            for violation in violations[:3]:  # 只记录前3个违规
+                logger.warning(f"Violation: {violation}")
+        else:
+            logger.info(f"DATA QUALITY CHECK: {len(all_signals)} signals passed all quality checks ✅")
+
+        return quality_report
+
+
     def _iter_signals_jsonl(self, signals_dir: Path) -> Iterator[Dict[str, Any]]:
-        """从JSONL文件读取signals"""
+        """从JSONL文件读取signals（带去重逻辑）"""
         import glob
         pattern = str(signals_dir / "**" / "signals*.jsonl")
         jsonl_files = glob.glob(pattern, recursive=True)
+
+        # 用于去重的集合：(ts_ms, symbol, signal_type, score)
+        seen_signals = set()
 
         for file_path in sorted(jsonl_files):
             try:
@@ -273,7 +917,20 @@ class BacktestAdapter:
                         if self.symbols and symbol not in self.symbols:
                             continue
 
-                        yield signal
+                        # 去重：使用(ts_ms, symbol, signal_type, score)作为唯一标识
+                        # 保留最新的run_id（通过文件排序，后面文件优先）
+                        signal_key = (
+                            ts_ms,
+                            symbol,
+                            signal.get('signal_type', ''),
+                            signal.get('score', 0.0)
+                        )
+
+                        if signal_key not in seen_signals:
+                            seen_signals.add(signal_key)
+                            yield signal
+                        # 否则跳过重复信号（静默跳过，避免日志污染）
+
             except Exception as e:
                 logger.warning(f"Error reading {file_path}: {e}")
 
@@ -283,6 +940,11 @@ class BacktestAdapter:
         try:
             conn = sqlite3.connect(str(db_path))
             cursor = conn.cursor()
+
+            # 读取节流窗口
+            dedupe_ms = int((self.config or {}).get("signal", {}).get("dedupe_ms", 0))
+            seen = set()
+            last_ts_per_sym = {}
 
             # 构建查询条件
             conditions = []
@@ -307,21 +969,53 @@ class BacktestAdapter:
             cursor.execute(sql, params)
             columns = [desc[0] for desc in cursor.description]
 
+            row_count = 0
             for row in cursor:
+                row_count += 1
                 signal = dict(zip(columns, row))
-                # 解析gating_json，确保gating字段总是存在
+                # 解析gating_json/gating，确保 signal['gating'] 最终是"原因列表"
+                raw_gating = signal.get("gating", None)
                 if 'gating_json' in signal:
                     try:
                         if signal['gating_json']:
-                            signal['gating'] = json.loads(signal['gating_json'])
+                            parsed = json.loads(signal['gating_json'])
+                            # 允许 gating_json 是 bool/list，全部规范成 list
+                            if isinstance(parsed, list):
+                                signal['gating'] = parsed
+                            elif isinstance(parsed, (bool, int)):
+                                signal['gating'] = [] if not parsed else [signal.get('guard_reason') or 'guarded']
+                            else:
+                                signal['gating'] = []
                         else:
                             signal['gating'] = []
-                    except (json.JSONDecodeError, TypeError):
+                    except Exception:
                         signal['gating'] = []
                     del signal['gating_json']
+                elif raw_gating is not None:
+                    # 兼容 CORE_ALGO 的 gating=0/1
+                    if isinstance(raw_gating, (bool, int)):
+                        signal['gating'] = [] if not raw_gating else [signal.get('guard_reason') or 'guarded']
+                    elif isinstance(raw_gating, list):
+                        signal['gating'] = raw_gating
+                    else:
+                        signal['gating'] = []
                 else:
-                    # 如果没有gating_json字段，设置默认值
                     signal['gating'] = []
+
+                # 轻度去重：ts_ms + symbol + signal_id
+                key = (signal.get("ts_ms"), signal.get("symbol"), signal.get("signal_id"))
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                # 时间节流：同一 symbol 在 dedupe_ms 窗口内仅保留首个
+                if dedupe_ms > 0:
+                    ts, sym = int(signal.get("ts_ms", 0)), str(signal.get("symbol","")).upper()
+                    last = last_ts_per_sym.get(sym, -10**18)
+                    if ts - last < dedupe_ms:
+                        continue
+                    last_ts_per_sym[sym] = ts
+
                 yield signal
 
             conn.close()
@@ -389,13 +1083,74 @@ class BacktestWriter:
         self.write_signals = write_signals
         self.emit_sqlite = emit_sqlite
 
+        # 定义允许的文件类型
+        self.allowed_extensions = {'.jsonl', '.json', '.sqlite', '.log'}
+        self.allowed_filenames = {
+            'signals.jsonl', 'signals.sqlite', 'trades.jsonl',
+            'pnl_daily.jsonl', 'run_manifest.json'
+        }
+
         # 初始化文件句柄
         self.signals_file = None
         self.trades_file = None
         self.pnl_file = None
         self.sqlite_conn = None
 
+        self._validate_output_directory()
         self._init_files()
+
+    def _validate_output_directory(self):
+        """验证输出目录约束"""
+        # 检查目录是否存在意外文件
+        if self.output_dir.exists():
+            existing_files = list(self.output_dir.glob("*"))
+            if existing_files:
+                logger.warning(f"Output directory {self.output_dir} is not empty: {existing_files}")
+                # 不强制清理，让用户自己处理
+
+    def validate_output_structure(self):
+        """验证输出结构约束：在写入完成后检查"""
+        try:
+            all_files = list(self.output_dir.glob("*"))
+            logger.info(f"Validating output structure: found {len(all_files)} files")
+
+            violations = []
+            for file_path in all_files:
+                if file_path.is_file():
+                    filename = file_path.name
+                    extension = file_path.suffix
+
+                    # 检查是否为允许的文件名或扩展名
+                    if filename not in self.allowed_filenames and extension not in self.allowed_extensions:
+                        violations.append(f"Unexpected file: {filename}")
+
+            if violations:
+                logger.error(f"OUTPUT STRUCTURE VIOLATIONS: {len(violations)} unexpected files")
+                for violation in violations:
+                    logger.error(f"  {violation}")
+                raise ValueError(f"Output directory contains unexpected files: {violations}")
+
+            # 检查必需文件是否存在
+            required_files = ['trades.jsonl', 'pnl_daily.jsonl', 'run_manifest.json']
+            if self.write_signals:
+                required_files.append('signals.jsonl')
+            if self.emit_sqlite:
+                required_files.append('signals.sqlite')
+
+            missing_files = []
+            for req_file in required_files:
+                if not (self.output_dir / req_file).exists():
+                    missing_files.append(req_file)
+
+            if missing_files:
+                logger.error(f"OUTPUT STRUCTURE VIOLATIONS: Missing required files: {missing_files}")
+                raise ValueError(f"Missing required output files: {missing_files}")
+
+            logger.info(f"OUTPUT STRUCTURE VALIDATION PASSED: {len(all_files)} files, all constraints satisfied ✅")
+
+        except Exception as e:
+            logger.error(f"Output structure validation failed: {e}")
+            raise
 
     def _init_files(self):
         """初始化输出文件"""
@@ -446,7 +1201,11 @@ class BacktestWriter:
         """写入signal"""
         # 若缺失，生成稳定signal_id（确保唯一性）
         if "signal_id" not in signal or signal["signal_id"] is None:
-            signal["signal_id"] = f"{signal.get('symbol','')}:{signal.get('ts_ms','')}:{int((signal.get('score') or 0)*1e6)}"
+            score = signal.get('score') or 0
+            # 处理NaN值
+            if isinstance(score, float) and math.isnan(score):
+                score = 0
+            signal["signal_id"] = f"{signal.get('symbol','')}:{signal.get('ts_ms','')}:{int(score*1e6)}"
 
         if self.signals_file:
             json.dump(signal, self.signals_file, ensure_ascii=False)
@@ -548,7 +1307,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
     return config
 
 
-def build_run_manifest(args, config: Dict[str, Any], symbols) -> Dict[str, Any]:
+def build_run_manifest(args, config: Dict[str, Any], symbols, features_price_dir: Optional[Path] = None) -> Dict[str, Any]:
     """构建运行清单"""
     run_id = args.run_id or f"bt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
 
@@ -575,6 +1334,7 @@ def build_run_manifest(args, config: Dict[str, Any], symbols) -> Dict[str, Any]:
         "output_dir": str(args.out_dir),
         "env": env_whitelist,
         "effective_config": {
+            "features_price_dir": str(features_price_dir) if features_price_dir else None,
             "heartbeat_interval_s": config.get("observability", {}).get("heartbeat_interval_s", 60),
             "fee_bps_maker": config.get("broker", {}).get("fee_bps_maker", -25),
             "fee_bps_taker": config.get("broker", {}).get("fee_bps_taker", 75),
@@ -605,6 +1365,8 @@ def main():
                        help="模式A: 历史features宽表根目录")
     parser.add_argument("--signals-src", type=str,
                        help="模式B: signals源 (jsonl://<dir> 或 sqlite://<db_path>)")
+    parser.add_argument("--features-price-dir", type=str,
+                       help="价格数据根目录，覆盖config.yaml中的data.features_price_dir")
     parser.add_argument("--symbols", type=str, default="BTCUSDT",
                        help="交易对列表，逗号分隔")
     parser.add_argument("--start", type=str, required=True,
@@ -625,6 +1387,8 @@ def main():
                        help="同时输出SQLite格式的signals")
     parser.add_argument("--strict-core", action="store_true",
                        help="CoreAlgorithm 计算失败时立即退出（默认为回退mock，便于排障）")
+    parser.add_argument("--consistency-qa", action="store_true",
+                       help="一致性QA模式：输出真实信号的一致性分布统计")
     parser.add_argument("--reemit-signals", action="store_true",
                        help="模式B下按需重发signals（默认不写，便于对账）")
 
@@ -635,6 +1399,17 @@ def main():
         parser.error("--features-dir required for mode A")
     if args.mode == "B" and not args.signals_src:
         parser.error("--signals-src required for mode B")
+
+    # 验证signals-src协议格式（仅模式B）
+    if args.mode == "B":
+        src = args.signals_src
+        if not (src.startswith("jsonl://") or src.startswith("sqlite://")):
+            # 温和自动补全：如果以.db结尾，自动添加sqlite://前缀
+            if src.endswith(".db"):
+                args.signals_src = f"sqlite://{src}"
+                logger.info(f"Auto-corrected signals-src to: {args.signals_src}")
+            else:
+                parser.error("signals-src must start with jsonl:// or sqlite://, got: %s" % src)
 
     # 加载配置
     config = load_config(args.config)
@@ -665,8 +1440,14 @@ def main():
     except pytz.exceptions.UnknownTimeZoneError:
         raise ValueError(f"Unknown timezone: {args.tz}")
 
+    # 解析最终的features_price_dir路径（用于manifest记录）
+    final_features_price_dir = resolve_features_price_dir(
+        cli_features_price_dir=getattr(args, 'features_price_dir', None),
+        config=config
+    )
+
     # 构建运行清单
-    manifest = build_run_manifest(args, config, symbols)
+    manifest = build_run_manifest(args, config, symbols, final_features_price_dir)
 
     # 初始化组件
 
@@ -678,11 +1459,14 @@ def main():
         start_ms=start_ms,
         end_ms=end_ms,
         strict_core=bool(args.strict_core),
+        consistency_qa_mode=bool(args.consistency_qa),
         run_id=manifest["run_id"],
-        config=config
+        config=config,
+        cli_features_price_dir=getattr(args, 'features_price_dir', None)
     )
 
     broker = BrokerSimulator(config.get("broker", {}))
+    strategy_emulator = StrategyEmulator(config)
     writer = BacktestWriter(
         Path(args.out_dir),
         manifest["run_id"],
@@ -691,6 +1475,13 @@ def main():
     )
 
     logger.info(f"Starting backtest {manifest['run_id']} in mode {args.mode}")
+
+    # 模式B：验证signals数据质量
+    data_quality_report = None
+    if args.mode == 'B':
+        logger.info("Performing signals data quality validation...")
+        data_quality_report = adapter.validate_signals_data_quality()
+        logger.info(f"Data quality check complete: {data_quality_report['total_signals']} signals validated")
 
     # 预估信号数量用于进度计算
     total_signals_expected = 0
@@ -762,82 +1553,104 @@ def main():
             if args.mode == "A":
                 writer.write_signal(signal)
 
-            # 模拟策略决策（简化版）
-            if signal.get("confirm", False) and len(signal.get("gating", [])) > 0:
-                # 从配置和信号中解析价格
-                price_fields = config.get("signal", {}).get("price_fields", ["mid_px", "price"])
-                price = None
-                for field in price_fields:
-                    if field in signal and signal[field] is not None:
-                        price = float(signal[field])
-                        break
+            # 策略仿真器：判断是否可交易和交易方向
+            can_trade, skip_reason = strategy_emulator.should_trade(signal)
+            if not can_trade:
+                logger.debug(f"Signal skipped: {skip_reason}")
+                continue
 
-                if price is None:
-                    logger.warning(f"No price field found in signal for {signal['symbol']}, skipping")
+            # 根据信号决定交易方向
+            side = strategy_emulator.decide_side(signal)
+            if not side:
+                continue   # 仍无法判定方向则跳过
+
+            # 信号可交易且方向明确，开始处理订单
+            # 从配置和信号中解析价格
+            price_fields = config.get("signal", {}).get("price_fields", ["mid_px", "price", "mid"])
+            price = None
+            for field in price_fields:
+                if field in signal and signal[field] is not None:
+                    price = float(signal[field])
+                    break
+
+            # 如果信号中没有价格，尝试从features数据获取真实价格
+            if price is None:
+                # 优先从features数据获取实时价格
+                real_price = adapter.get_price_at_time(signal.get("symbol", ""), signal.get("ts_ms", 0))
+                if real_price is not None and real_price > 0:
+                    price = real_price
+                    logger.debug(f"Using real price from features: {signal['symbol']} @ {price}")
+                else:
+                    # 找不到价格，加"no_price" gating，跳过该信号
+                    logger.warning(f"No price available for {signal['symbol']} at {signal.get('ts_ms', 0)}, skipping")
                     continue
 
-                # 从配置中获取订单数量
-                qty = config.get("order", {}).get("qty", config.get("broker", {}).get("min_order_qty", 0.001))
+            if price is None or price <= 0:
+                logger.warning(f"Invalid price {price} for {signal['symbol']}, skipping")
+                continue
 
-                # 生成订单
-                order = {
-                    "symbol": signal["symbol"],
-                    "side": "BUY" if signal.get("score", 0) > 0 else "SELL",
-                    "price": price,
-                    "quantity": float(qty),
-                    "reason": "signal_confirmed",
-                    "maker": bool(config.get("broker", {}).get("maker_first", True)),
-                    "signal_ts_ms": int(signal["ts_ms"])  # 传入信号时间戳用于延迟计算
-                }
+            # 从配置中获取订单数量
+            qty = config.get("order", {}).get("qty", config.get("broker", {}).get("min_order_qty", 0.001))
 
-                # 执行订单
-                trade = broker.execute_order(order)
-                if trade:
-                    # 计算并添加turnover到trade记录（fee_abs已在BrokerSimulator中设置）
-                    turnover_amount = abs(trade["exec_px"] * trade["qty"])
-                    trade["turnover"] = round(turnover_amount, 8)
+            # 生成订单
+            order = {
+                "symbol": signal["symbol"],
+                "side": side,
+                "price": price,
+                "quantity": float(qty),
+                "reason": "signal_confirmed",
+                "maker": bool(config.get("broker", {}).get("maker_first", True)),
+                "signal_ts_ms": int(signal["ts_ms"])  # 传入信号时间戳用于延迟计算
+            }
 
-                    # PnL计算：使用持仓簿和闭合腿
-                    sym = trade["symbol"]
-                    side = trade["side"]
-                    px = trade["exec_px"]
-                    qty = trade["qty"]
-                    trade_ts = trade["ts_ms"]
+            # 执行订单
+            trade = broker.execute_order(order)
+            if trade:
+                # 计算并添加turnover到trade记录（fee_abs已在BrokerSimulator中设置）
+                turnover_amount = abs(trade["exec_px"] * trade["qty"])
+                trade["turnover"] = round(turnover_amount, 8)
 
-                    lots.setdefault(sym, deque())
+                # PnL计算：使用持仓簿和闭合腿
+                sym = trade["symbol"]
+                side = trade["side"]
+                px = trade["exec_px"]
+                qty = trade["qty"]
+                trade_ts = trade["ts_ms"]
 
-                    # 处理持仓簿
-                    if side == "BUY":
-                        # 先平空头仓位
-                        remain = qty
-                        while remain > 1e-12 and lots[sym] and lots[sym][0]["side"] == "SELL":
-                            leg = lots[sym][0]
-                            close_qty = min(remain, leg["qty"])
+                lots.setdefault(sym, deque())
 
-                            if close_qty > 0:
-                                trade_fee = float(trade.get("fee_abs", 0.0))
-                                # 分摊开仓费用
-                                fee_open_part = float(leg.get("fee_open", 0.0)) * (close_qty / leg.get("qty_open", close_qty))
-                                # 总费用 = 开仓费分摊 + 平仓费分摊
-                                total_fee = fee_open_part + (trade_fee * (close_qty / qty))
+                # 处理持仓簿
+                if side == "BUY":
+                    # 先平空头仓位
+                    remain = qty
+                    while remain > 1e-12 and lots[sym] and lots[sym][0]["side"] == "SELL":
+                        leg = lots[sym][0]
+                        close_qty = min(remain, leg["qty"])
 
-                                pnl = (leg["px"] - px) * close_qty
-                                closed_legs.append({
-                                    "sym": sym,
-                                    "open_ts": leg["ts"],
-                                    "close_ts": trade_ts,
-                                    "pnl": pnl,
-                                    "fee_abs": total_fee
-                                })
+                        if close_qty > 0:
+                            trade_fee = float(trade.get("fee_abs", 0.0))
+                            # 分摊开仓费用
+                            fee_open_part = float(leg.get("fee_open", 0.0)) * (close_qty / leg.get("qty_open", close_qty))
+                            # 总费用 = 开仓费分摊 + 平仓费分摊
+                            total_fee = fee_open_part + (trade_fee * (close_qty / qty))
 
-                            leg["qty"] -= close_qty
-                            remain -= close_qty
+                            pnl = (leg["px"] - px) * close_qty
+                            closed_legs.append({
+                                "sym": sym,
+                                "open_ts": leg["ts"],
+                                "close_ts": trade_ts,
+                                "pnl": pnl,
+                                "fee_abs": total_fee
+                            })
 
-                            if leg["qty"] <= 1e-12:
-                                lots[sym].popleft()
+                        leg["qty"] -= close_qty
+                        remain -= close_qty
 
-                        # 剩余部分作为新多头仓位
-                        if remain > 1e-12:
+                        if leg["qty"] <= 1e-12:
+                            lots[sym].popleft()
+
+                    # 剩余部分作为新多头仓位
+                    if remain > 1e-12:
                             lots[sym].append({
                                 "side": "BUY",
                                 "px": px,
@@ -985,14 +1798,45 @@ def main():
             except Exception:
                 pass
 
-        manifest["perf"] = {
+        # 检查价格缓存质量并添加到manifest
+        if adapter._price_cache is not None:
+            price_source_info = adapter._price_cache._get_quality_report()
+        else:
+            price_source_info = {
+                "price_cache_loaded": 0,
+                "price_cache_failure": adapter._price_cache_failure,
+                "price_cache_error": adapter._price_cache_error_msg,
+                "price_points_total": 0,
+                "symbols_loaded": []
+            }
+
+        perf_info = {
             "signals_processed": processed_signals,
             "trades_generated": generated_trades,
             "duration_s": round(duration_s, 2),
             "avg_rps": round(processed_signals / max(duration_s, 1), 2),
-            "memory_gib": final_mem_gib
+            "memory_gib": final_mem_gib,
+            "price_source": price_source_info
         }
+
+        # 添加数据质量报告（如果有）
+        if data_quality_report:
+            perf_info["data_quality"] = data_quality_report
+
+        manifest["perf"] = perf_info
+
+        # 如果价格缓存失败，在日志中再次强调
+        if adapter._price_cache_failure:
+            logger.error(f"BACKTEST QUALITY WARNING: {adapter._price_cache_error_msg}")
+            logger.error("This backtest used unrealistic default prices. Results may not reflect real market conditions.")
         writer.write_manifest(manifest)
+
+        # 验证输出结构约束
+        try:
+            writer.validate_output_structure()
+        except Exception as e:
+            logger.error(f"Output structure validation failed: {e}")
+            raise
 
         logger.info(f"Backtest completed: {processed_signals} signals, {generated_trades} trades in {duration_s:.1f}s")
         logger.info(f"Output directory: {writer.output_dir}")
