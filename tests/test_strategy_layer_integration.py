@@ -242,12 +242,12 @@ class TestStrategyLayerIntegration:
 
     def test_strategy_constants_consistency(self):
         """测试策略常量的一致性"""
-        # 验证从backtest.app导入的常量与policy模块一致
-        from backtest.app import SOFT_GATING as APP_SOFT_GATING
-        from backtest.app import HARD_ALWAYS_BLOCK as APP_HARD_BLOCK
+        # 验证常量定义一致性（app.py已不再导入这些常量）
+        from alpha_core.strategy.policy import SOFT_GATING as PolicySoftGating
+        from alpha_core.strategy.policy import HARD_ALWAYS_BLOCK as PolicyHardBlock
 
-        assert APP_SOFT_GATING == SOFT_GATING
-        assert APP_HARD_BLOCK == HARD_ALWAYS_BLOCK
+        assert PolicySoftGating == SOFT_GATING
+        assert PolicyHardBlock == HARD_ALWAYS_BLOCK
 
     def test_is_tradeable_integration(self):
         """测试is_tradeable函数的集成"""

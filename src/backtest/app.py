@@ -45,9 +45,6 @@ logger = logging.getLogger(__name__)
 
 # 导入策略层组件
 from alpha_core.strategy.policy import (
-    SOFT_GATING,
-    HARD_ALWAYS_BLOCK,
-    is_tradeable,
     StrategyEmulator,
 )
 
@@ -1695,54 +1692,54 @@ def main():
 
                     # 剩余部分作为新多头仓位
                     if remain > 1e-12:
-                            lots[sym].append({
-                                "side": "BUY",
-                                "px": px,
-                                "qty": remain,
-                                "ts": trade_ts,
-                                "fee_open": float(trade.get("fee_abs", 0.0)),
-                                "qty_open": remain
+                        lots[sym].append({
+                            "side": "BUY",
+                            "px": px,
+                            "qty": remain,
+                            "ts": trade_ts,
+                            "fee_open": float(trade.get("fee_abs", 0.0)),
+                            "qty_open": remain
+                        })
+
+                elif side == "SELL":
+                    # 先平多头仓位
+                    remain = qty
+                    while remain > 1e-12 and lots[sym] and lots[sym][0]["side"] == "BUY":
+                        leg = lots[sym][0]
+                        close_qty = min(remain, leg["qty"])
+
+                        if close_qty > 0:
+                            trade_fee = float(trade.get("fee_abs", 0.0))
+                            # 分摊开仓费用
+                            fee_open_part = float(leg.get("fee_open", 0.0)) * (close_qty / leg.get("qty_open", close_qty))
+                            # 总费用 = 开仓费分摊 + 平仓费分摊
+                            total_fee = fee_open_part + (trade_fee * (close_qty / qty))
+
+                            pnl = (px - leg["px"]) * close_qty
+                            closed_legs.append({
+                                "sym": sym,
+                                "open_ts": leg["ts"],
+                                "close_ts": trade_ts,
+                                "pnl": pnl,
+                                "fee_abs": total_fee
                             })
 
-                    else:  # SELL
-                        # 先平多头仓位
-                        remain = qty
-                        while remain > 1e-12 and lots[sym] and lots[sym][0]["side"] == "BUY":
-                            leg = lots[sym][0]
-                            close_qty = min(remain, leg["qty"])
+                        leg["qty"] -= close_qty
+                        remain -= close_qty
 
-                            if close_qty > 0:
-                                trade_fee = float(trade.get("fee_abs", 0.0))
-                                # 分摊开仓费用
-                                fee_open_part = float(leg.get("fee_open", 0.0)) * (close_qty / leg.get("qty_open", close_qty))
-                                # 总费用 = 开仓费分摊 + 平仓费分摊
-                                total_fee = fee_open_part + (trade_fee * (close_qty / qty))
+                        if leg["qty"] <= 1e-12:
+                            lots[sym].popleft()
 
-                                pnl = (px - leg["px"]) * close_qty
-                                closed_legs.append({
-                                    "sym": sym,
-                                    "open_ts": leg["ts"],
-                                    "close_ts": trade_ts,
-                                    "pnl": pnl,
-                                    "fee_abs": total_fee
-                                })
-
-                            leg["qty"] -= close_qty
-                            remain -= close_qty
-
-                            if leg["qty"] <= 1e-12:
-                                lots[sym].popleft()
-
-                        # 剩余部分作为新空头仓位
-                        if remain > 1e-12:
-                            lots[sym].append({
-                                "side": "SELL",
-                                "px": px,
-                                "qty": remain,
-                                "ts": trade_ts,
-                                "fee_open": float(trade.get("fee_abs", 0.0)),
-                                "qty_open": remain
-                            })
+                    # 剩余部分作为新空头仓位
+                    if remain > 1e-12:
+                        lots[sym].append({
+                            "side": "SELL",
+                            "px": px,
+                            "qty": remain,
+                            "ts": trade_ts,
+                            "fee_open": float(trade.get("fee_abs", 0.0)),
+                            "qty_open": remain
+                        })
 
                     # 统计每日成交额与成交笔数（按成交时间切日）
                     trade_date = datetime.fromtimestamp(trade["ts_ms"]/1000, tz=tz).strftime("%Y-%m-%d")
