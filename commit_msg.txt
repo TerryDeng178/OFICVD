@@ -1,0 +1,11 @@
+feat: 完成Phase C - confirm语义重构与质量分层
+
+- 新增quality_mode参数(conservative/balanced/aggressive/all)
+- 实现三档质量分层逻辑(strong/normal/weak)
+- StrategyEmulator集成质量过滤功能
+- 完善confirm管道的硬软护栏分离
+- 新增完整测试套件(test_backtest_gating*)
+- 更新文档和配置
+- 清理废弃配置文件和输出文件
+
+BREAKING: confirm语义重构，影响回测结果分析

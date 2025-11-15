@@ -1,5 +1,5 @@
 # TASK_INDEX · OFI+CVD（V4.1）
-> 更新日期：2025-11-08 (Asia/Tokyo)
+> 更新日期：2025-11-15 (Asia/Tokyo)
 
 本索引对应 README V4.1（已纳入 **HARVEST / CORE_ALGO**）。按里程碑分三阶段：
 
@@ -67,7 +67,32 @@
 - 06 依赖 05  
 - 07 依赖 03/05/06  
 - 07A 依赖 07  
-- 07B 依赖 07/07A  
-- 08 依赖 01/04/05  
-- 09 依赖 08  
+- 07B 依赖 07/07A
+- 08 依赖 01/04/05
+- 09 依赖 08
 - 10 贯穿全程
+
+---
+
+## 架构约束：策略层边界规则
+
+为确保回测/实盘/测试网环境的一致性，策略决策逻辑统一在 `alpha_core.strategy` 模块实现：
+
+### ✅ 允许在策略模块中实现：
+- `SOFT_GATING` / `HARD_ALWAYS_BLOCK` 常量定义
+- `is_tradeable(signal, gating_mode)` 函数
+- `StrategyEmulator` 类（含 `should_trade` / `decide_side` 方法）
+- 各种 gating/quality/confirm 决策逻辑
+
+### ❌ 禁止在环境壳中实现：
+- 直接解析 `signal['gating_reasons']` 或 `signal['quality_tier']` 做决策
+- 直接根据 `score` 正负号判断 BUY/SELL（除非是配置读取）
+- 重新实现 gating/confirm 组合逻辑
+- 在回测APP/执行器/编排器中定义策略常量或决策函数
+
+### 🛡️ 边界防护：
+- **代码审查清单**：PR 模板包含策略边界检查项
+- **自动化检测**：`scripts/check_strategy_leakage.py` 可检测策略泄漏
+- **测试验证**：策略模块独立单元测试，确保与环境壳解耦
+
+违反上述约束的代码变更需先迁移到 `alpha_core.strategy` 模块。
