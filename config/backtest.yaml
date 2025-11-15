@@ -2,25 +2,28 @@
 # Backtest Configuration
 # TASK-08: 回放+回测 Harness 配置文件
 
+# TASK_PARAM_CORE_TUNING: 信号参数调优专用配置
+# 2025-11-XX: 基于TASK_CORE_CONFIRM后的参数调优baseline
+# 当前参数对应: strict模式约30笔交易/2h, 作为调优起点
 signal:
   sink: jsonl  # jsonl | sqlite | null
   # 信号/中间件类产物目录（与 paths.output_dir 分离，便于清洁产出）
   output_dir: ./runtime
   replay_mode: 1  # Always 1 for backtest
   # 信号生成参数（用于优化器参数覆盖）
-  weak_signal_threshold: 0.15  # 弱信号阈值 (从0.2下调，开始调优)
-  consistency_min: 0.05  # 最小一致性要求 (从0.15下调，开始调优)
+  weak_signal_threshold: 0.20  # 弱信号阈值 (当前baseline: 0.20)
+  consistency_min: 0.15  # 最小一致性要求 (当前baseline: 0.15)
   consistency_min_per_regime:
-    active: 0.05  # 活跃模式一致性阈值
-    quiet: 0.08   # 静默模式一致性阈值
+    active: 0.18  # 活跃模式一致性阈值 (当前baseline: 0.18)
+    quiet: 0.12   # 静默模式一致性阈值 (当前baseline: 0.12)
   # min_consecutive_same_dir: 3  # 最小连续同向要求 (F1 Trial 5最优参数)
   # dedupe_ms: 8000  # 信号去重窗口 (F1 Trial 5最优参数)
   # 方向决策阈值：score绝对值需要超过此值才能用于方向判断
   min_abs_score_for_side: 0.0  # 默认0.0，允许任何非零score决定方向
   thresholds:
     active:
-      buy: 0.5  # Active模式买入阈值
-      sell: -0.5  # Active模式卖出阈值
+      buy: 0.4  # Active模式买入阈值 (降低到0.4，增加交易机会)
+      sell: -0.4  # Active模式卖出阈值 (降低到-0.4，增加交易机会)
 
 components:
   fusion:

@@ -1,0 +1,42 @@
+# -*- coding: utf-8 -*-
+# 降低一致性阈值 - 用于验证CoreAlgorithm的confirm机制是否正常工作
+# TASK-CORE-CONFIRM: Phase 2 - 降低consistency_min阈值
+
+signal:
+  sink: jsonl
+  output_dir: ./runtime
+  replay_mode: 1
+
+  # 极度放宽一致性阈值 - 用于验证机制
+  weak_signal_threshold: 0.0  # 设为0，完全不拦截弱信号
+  consistency_min: 0.0         # 设为0，完全不拦截一致性
+  consistency_min_per_regime:
+    active: 0.0
+    quiet: 0.0
+
+  min_abs_score_for_side: 0.0
+  thresholds:
+    active:
+      buy: 0.4
+      sell: -0.4
+
+components:
+  fusion:
+    min_consecutive: 1  # 最低连击要求
+
+# TASK-CORE-CONFIRM: 开启debug/QA输出，包括早期退出诊断
+debug:
+  core_confirm_trace: true
+
+data:
+  features_price_dir: "deploy/data/ofi_cvd"
+
+backtest:
+  taker_fee_bps: 2.0
+  slippage_bps: 1.0
+  notional_per_trade: 1000
+  reverse_on_signal: false
+  rollover_timezone: "UTC"
+  rollover_hour: 0
+  slippage_model: "static"
+  fee_model: "taker_static"

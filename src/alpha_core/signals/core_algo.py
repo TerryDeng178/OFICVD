@@ -49,6 +49,16 @@ except ImportError:
 import logging
 logger = logging.getLogger(__name__)
 
+# 导入Fusion引擎用于consistency计算
+try:
+    from alpha_core.microstructure.fusion import OFI_CVD_Fusion, OFICVDFusionConfig
+    FUSION_AVAILABLE = True
+except ImportError:
+    OFI_CVD_Fusion = None
+    OFICVDFusionConfig = None
+    FUSION_AVAILABLE = False
+    logger.warning("[CoreAlgorithm] Fusion engine not available for consistency calculation")
+
 # 如果 v2 组件不可用，记录警告
 if not SIGNAL_V2_AVAILABLE:
     logger.warning("[CoreAlgorithm] Signal v2 components not available, falling back to v1")
@@ -83,6 +93,7 @@ REQUIRED_FIELDS: List[str] = [
 DEFAULT_SIGNAL_CONFIG: Dict[str, Any] = {
     "dedupe_ms": 250,
     "weak_signal_threshold": 0.2,
+    "strong_threshold": 0.8,  # Phase C: strong 档位阈值（|score| >= 0.8）
     "consistency_min": 0.15,
     # 分模式/分场景的一致性阈值（优先级高于 consistency_min）
     "consistency_min_per_regime": {
@@ -125,6 +136,25 @@ class SignalStats:
     suppressed: int = 0
     deduplicated: int = 0
     warmup_blocked: int = 0
+
+    # TASK_CONFIRM_PIPELINE_TUNING: Phase A - 确认漏斗诊断统计
+    # 漏斗各层通过计数
+    total_signals: int = 0
+    pass_weak_signal_filter: int = 0
+    pass_consistency_filter: int = 0
+    candidate_confirm_true: int = 0
+    reverse_prevention_blocked: int = 0
+    confirm_true: int = 0
+
+    # TASK_CONFIRM_PIPELINE_TUNING: Phase C - 质量分档统计
+    # strong/normal/weak 分档计数
+    strong_tier_signals: int = 0
+    normal_tier_signals: int = 0
+    weak_tier_signals: int = 0
+    # 各档位确认统计
+    strong_tier_confirm: int = 0
+    normal_tier_confirm: int = 0
+    weak_tier_confirm: int = 0
 
 
 class SignalSink:
@@ -730,10 +760,12 @@ class CoreAlgorithm:
 
         # 临时日志：验证配置生效（用于调试 config["signal"] 生效问题）
         logger.info(
-            f"[CoreAlgorithm] thresholds: weak={self.config['weak_signal_threshold']}, "
-            f"consistency_min={self.config['consistency_min']}, "
-            f"per_regime={self.config.get('consistency_min_per_regime')}"
+            f"[CoreAlgorithm] thresholds: weak={self.config.get('weak_signal_threshold', 'NOT_SET')}, "
+            f"consistency_min={self.config.get('consistency_min', 'NOT_SET')}, "
+            f"strong_threshold={self.config.get('strong_threshold', 'NOT_SET')}, "
+            f"confirm_mode={self.config.get('confirm_mode', 'NOT_SET')}"
         )
+        logger.info(f"[CoreAlgorithm] config keys: {list(self.config.keys())}")
 
         sink_cfg = self.config.get("sink", {})
         base_dir = Path(output_dir or sink_cfg.get("output_dir", "./runtime"))
@@ -837,6 +869,30 @@ class CoreAlgorithm:
         self.min_consecutive_same_dir = int(self.config.get("min_consecutive_same_dir", 1))
         # 方向streak跟踪: symbol -> (direction, count)
         self._dir_streak_state: Dict[str, tuple] = {}  # symbol -> (last_direction, consecutive_count)
+
+        # TASK-CORE-CONFIRM: 初始化Fusion引擎用于consistency计算
+        self._fusion_engine = None
+        if FUSION_AVAILABLE and OFICVDFusionConfig is not None:
+            try:
+                # 从配置中获取fusion参数
+                fusion_cfg = self.config.get("components", {}).get("fusion", {})
+                fusion_config = OFICVDFusionConfig(
+                    w_ofi=fusion_cfg.get("w_ofi", 0.6),
+                    w_cvd=fusion_cfg.get("w_cvd", 0.4),
+                    fuse_buy=fusion_cfg.get("fuse_buy", 0.95),
+                    fuse_strong_buy=fusion_cfg.get("fuse_strong_buy", 1.70),
+                    fuse_sell=fusion_cfg.get("fuse_sell", -0.95),
+                    fuse_strong_sell=fusion_cfg.get("fuse_strong_sell", -1.70),
+                    min_consistency=fusion_cfg.get("min_consistency", 0.15),
+                    strong_min_consistency=fusion_cfg.get("strong_min_consistency", 0.6)
+                )
+                self._fusion_engine = OFI_CVD_Fusion(fusion_config)
+                logger.info("[CoreAlgorithm] Fusion engine initialized for consistency calculation")
+            except Exception as e:
+                logger.warning(f"[CoreAlgorithm] Failed to initialize fusion engine: {e}")
+                self._fusion_engine = None
+        else:
+            logger.warning("[CoreAlgorithm] Fusion engine not available, consistency calculation will use fallback")
         
         # F3修复: 退出后冷静期跟踪
         # 从strategy配置中读取cooldown_after_exit_sec
@@ -909,13 +965,112 @@ class CoreAlgorithm:
         return self._stats
 
     def close(self) -> None:
+        # TASK_CONFIRM_PIPELINE_TUNING: Phase A - 输出确认漏斗统计
+        enable_funnel_diagnostics = (
+            self.config.get("enable_confirm_funnel_diagnostics") or
+            self.config.get("signal", {}).get("enable_confirm_funnel_diagnostics", False)
+        )
+        funnel_output_mode = (
+            self.config.get("funnel_output_mode") or
+            self.config.get("signal", {}).get("funnel_output_mode", "log")
+        )
+
+
+        if enable_funnel_diagnostics and self._stats.total_signals > 0:
+            funnel_stats = {
+                "total_signals": self._stats.total_signals,
+                "pass_weak_signal_filter": self._stats.pass_weak_signal_filter,
+                "pass_consistency_filter": self._stats.pass_consistency_filter,
+                "candidate_confirm_true": self._stats.candidate_confirm_true,
+                "reverse_prevention_blocked": self._stats.reverse_prevention_blocked,
+                "confirm_true": self._stats.confirm_true
+            }
+
+            # 计算漏斗各层通过率
+            funnel_rates = {
+                "weak_signal_pass_rate": self._stats.pass_weak_signal_filter / self._stats.total_signals * 100,
+                "consistency_pass_rate": self._stats.pass_consistency_filter / self._stats.total_signals * 100,
+                "candidate_confirm_rate": self._stats.candidate_confirm_true / self._stats.total_signals * 100,
+                "confirm_true_rate": self._stats.confirm_true / self._stats.total_signals * 100,
+                "reverse_prevention_impact": self._stats.reverse_prevention_blocked / self._stats.total_signals * 100
+            }
+
+            if funnel_output_mode in ("log", "both"):
+                logger.info("[CONFIRM_FUNNEL_STATS] 确认漏斗统计:")
+                logger.info(f"  总信号数: {funnel_stats['total_signals']}")
+                logger.info(f"  弱信号过滤通过: {funnel_stats['pass_weak_signal_filter']} ({funnel_rates['weak_signal_pass_rate']:.1f}%)")
+                logger.info(f"  一致性过滤通过: {funnel_stats['pass_consistency_filter']} ({funnel_rates['consistency_pass_rate']:.1f}%)")
+                logger.info(f"  候选确认: {funnel_stats['candidate_confirm_true']} ({funnel_rates['candidate_confirm_rate']:.1f}%)")
+                logger.info(f"  反向防抖拦截: {funnel_stats['reverse_prevention_blocked']} ({funnel_rates['reverse_prevention_impact']:.1f}%)")
+                logger.info(f"  最终确认: {funnel_stats['confirm_true']} ({funnel_rates['confirm_true_rate']:.1f}%)")
+
+            if funnel_output_mode in ("json", "both"):
+                # 输出到JSON文件
+                import json
+                from pathlib import Path
+                output_dir = Path(self.config.get("signal", {}).get("output_dir", "./runtime"))
+                funnel_file = output_dir / "confirm_funnel_stats.json"
+                funnel_file.parent.mkdir(parents=True, exist_ok=True)
+
+                output_data = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "stats": funnel_stats,
+                    "rates": funnel_rates,
+                    "config_summary": {
+                        "weak_signal_threshold": self.config.get("signal", {}).get("weak_signal_threshold"),
+                        "consistency_min": self.config.get("signal", {}).get("consistency_min"),
+                        "min_consecutive_same_dir": self.config.get("signal", {}).get("min_consecutive_same_dir")
+                    }
+                }
+
+                with open(funnel_file, "w", encoding="utf-8") as f:
+                    json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+                logger.info(f"[CONFIRM_FUNNEL_STATS] 漏斗统计已保存到: {funnel_file}")
+
+        # TASK_CONFIRM_PIPELINE_TUNING: Phase C - 输出质量分档统计
+        if enable_funnel_diagnostics and self._stats.total_signals > 0:
+            quality_stats = {
+                "strong_tier_signals": self._stats.strong_tier_signals,
+                "normal_tier_signals": self._stats.normal_tier_signals,
+                "weak_tier_signals": self._stats.weak_tier_signals,
+                "strong_tier_confirm": self._stats.strong_tier_confirm,
+                "normal_tier_confirm": self._stats.normal_tier_confirm,
+                "weak_tier_confirm": self._stats.weak_tier_confirm
+            }
+
+            # 计算分档分布和确认率
+            quality_distribution = {
+                "strong_tier_ratio": self._stats.strong_tier_signals / self._stats.total_signals * 100,
+                "normal_tier_ratio": self._stats.normal_tier_signals / self._stats.total_signals * 100,
+                "weak_tier_ratio": self._stats.weak_tier_signals / self._stats.total_signals * 100
+            }
+
+            quality_confirm_rates = {
+                "strong_confirm_rate": self._stats.strong_tier_confirm / self._stats.strong_tier_signals * 100 if self._stats.strong_tier_signals > 0 else 0,
+                "normal_confirm_rate": self._stats.normal_tier_confirm / self._stats.normal_tier_signals * 100 if self._stats.normal_tier_signals > 0 else 0,
+                "weak_confirm_rate": self._stats.weak_tier_confirm / self._stats.weak_tier_signals * 100 if self._stats.weak_tier_signals > 0 else 0
+            }
+
+            if funnel_output_mode in ("log", "both"):
+                logger.info("[QUALITY_TIER_STATS] 质量分档统计:")
+                logger.info(f"  Strong档: {quality_stats['strong_tier_signals']} 信号, {quality_stats['strong_tier_confirm']} 确认 ({quality_confirm_rates['strong_confirm_rate']:.1f}%)")
+                logger.info(f"  Normal档: {quality_stats['normal_tier_signals']} 信号, {quality_stats['normal_tier_confirm']} 确认 ({quality_confirm_rates['normal_confirm_rate']:.1f}%)")
+                logger.info(f"  Weak档: {quality_stats['weak_tier_signals']} 信号, {quality_stats['weak_tier_confirm']} 确认 ({quality_confirm_rates['weak_confirm_rate']:.1f}%)")
+
+            if funnel_output_mode in ("json", "both"):
+                # 在JSON文件中添加质量分档统计
+                output_data["quality_stats"] = quality_stats
+                output_data["quality_distribution"] = quality_distribution
+                output_data["quality_confirm_rates"] = quality_confirm_rates
+
         # TASK-A4: 关闭 SignalWriterV2（如果使用）
         if self._use_v2 and self._signal_writer_v2:
             try:
                 self._signal_writer_v2.close()
             except Exception as e:
                 logger.error(f"[CoreAlgorithm] Failed to close SignalWriterV2: {e}")
-        
+
         # TASK-A4 修复1: v2 路径不关闭旧 sink（因为未初始化）
         # P1: 打印sink使用摘要（类名和关键参数）
         if self._sink:
@@ -931,7 +1086,15 @@ class CoreAlgorithm:
             self._sink.close()
 
     def process_feature_row(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # TASK-CORE-CONFIRM: 添加早期退出诊断
+        core_confirm_trace = self.config.get("debug", {}).get("core_confirm_trace", False)
+
+        if core_confirm_trace:
+            logger.info(f"[CORE_CONFIRM_TRACE_EARLY] Processing row: ts_ms={row.get('ts_ms')}, symbol={row.get('symbol')}")
+
         if not self._validate_row(row):
+            if core_confirm_trace:
+                logger.info(f"[CORE_CONFIRM_TRACE_EARLY] Row validation failed: {row.get('ts_ms')}, {row.get('symbol')}")
             return None
 
         ts_ms = int(row["ts_ms"])
@@ -939,6 +1102,8 @@ class CoreAlgorithm:
         symbol = str(row["symbol"]).upper()
 
         if self._is_duplicate(symbol, ts_ms):
+            if core_confirm_trace:
+                logger.info(f"[CORE_CONFIRM_TRACE_EARLY] Duplicate detected: {ts_ms}, {symbol}")
             return None
 
         self._stats.processed += 1
@@ -950,17 +1115,19 @@ class CoreAlgorithm:
         # 否则使用 v1 路径（向后兼容）
         score = self._resolve_score(row)
         # 处理 None 值（Parquet 文件可能包含 None）
-        consistency_val = row.get("consistency")
         spread_bps_val = row.get("spread_bps")
         lag_sec_val = row.get("lag_sec")
-        consistency = float(consistency_val if consistency_val is not None else 0.0)
         spread_bps = float(spread_bps_val if spread_bps_val is not None else 0.0)
         lag_sec = float(lag_sec_val if lag_sec_val is not None else 0.0)
         warmup = bool(row.get("warmup", False))
         reason_codes = row.get("reason_codes", []) or []
-        
+
+        # TASK-CORE-CONFIRM: 使用Fusion引擎计算consistency，而不是从feature文件读取
+        consistency_raw = self._calculate_consistency_with_fusion(row)
+
         # P0: consistency 保守底座（避免 93% 被 low_consistency 一刀切）
-        if consistency <= 0.0:
+        consistency = consistency_raw  # 初始化为raw值
+        if consistency_raw <= 0.0:
             consistency_floor_when_abs_score_ge = self.config.get("consistency_floor_when_abs_score_ge", 0.4)
             consistency_floor = self.config.get("consistency_floor", 0.10)
             consistency_floor_on_divergence = self.config.get("consistency_floor_on_divergence", 0.12)
@@ -1003,7 +1170,15 @@ class CoreAlgorithm:
                 effective_consistency_min = consistency_min_per_regime[regime]
 
         gating_reasons: List[str] = []
-        
+
+        # TASK_CONFIRM_PIPELINE_TUNING: Phase A - 漏斗统计初始化
+        enable_funnel_diagnostics = (
+            self.config.get("enable_confirm_funnel_diagnostics") or
+            self.config.get("signal", {}).get("enable_confirm_funnel_diagnostics", False)
+        )
+        if enable_funnel_diagnostics:
+            self._stats.total_signals += 1
+
         # F3修复: 退出后冷静期检查（需要在ReplayFeeder中调用record_exit来更新）
         if self.cooldown_after_exit_sec > 0:
             last_exit_ts = self._last_exit_ts_per_symbol.get(symbol)
@@ -1020,8 +1195,20 @@ class CoreAlgorithm:
             gating_reasons.append(f"spread_bps>{self.config['spread_bps_cap']}")
         if lag_sec > self.config["lag_cap_sec"]:
             gating_reasons.append(f"lag_sec>{self.config['lag_cap_sec']}")
+
+        # TASK_CONFIRM_PIPELINE_TUNING: Phase A - 一致性过滤统计
+        consistency_passed = consistency >= effective_consistency_min
+        if enable_funnel_diagnostics and consistency_passed:
+            self._stats.pass_consistency_filter += 1
+
         if consistency < effective_consistency_min:
             gating_reasons.append("low_consistency")
+
+        # TASK_CONFIRM_PIPELINE_TUNING: Phase A - 弱信号过滤统计
+        weak_signal_passed = abs(score) >= effective_weak_signal_threshold or warmup
+        if enable_funnel_diagnostics and weak_signal_passed:
+            self._stats.pass_weak_signal_filter += 1
+
         if abs(score) < effective_weak_signal_threshold and not warmup:
             gating_reasons.append("weak_signal")
         if reason_codes:
@@ -1033,8 +1220,98 @@ class CoreAlgorithm:
         elif score <= thresholds["sell"]:
             candidate_direction = -1
 
+        # TASK-CORE-CONFIRM: debug/QA 输出开关
+        core_confirm_trace = self.config.get("debug", {}).get("core_confirm_trace", False)
+
+        # TASK_CONFIRM_PIPELINE_TUNING: Phase A - 候选确认统计
+        candidate_confirm = candidate_direction != 0 and not gating_reasons
+        if enable_funnel_diagnostics and candidate_confirm:
+            self._stats.candidate_confirm_true += 1
+
+        # TASK_CONFIRM_PIPELINE_TUNING: Phase C - 三档质量分层逻辑
+        confirm_mode = self.config.get("confirm_mode", "v1")  # 先尝试直接读取
+        if confirm_mode == "v1":  # 如果没找到，尝试从signal小节读取
+            confirm_mode = self.config.get("signal", {}).get("confirm_mode", "v1")
+
+        # DEBUG: 记录confirm_mode读取结果
+        if core_confirm_trace:
+            logger.info(f"[CONFIRM_MODE_DEBUG] confirm_mode={confirm_mode}, config_keys={list(self.config.keys())}")
+
+        # Phase C: 获取strong_threshold
+        strong_threshold = self.config.get("strong_threshold", 0.8)
+        effective_strong_threshold = strong_threshold  # TODO: 可以后续添加场景化覆写
+
+        # Phase C: 质量分档 - 根据score绝对值确定档位
+        abs_score = abs(score)
+        if abs_score >= effective_strong_threshold:
+            quality_tier = "strong"
+            self._stats.strong_tier_signals += 1
+        elif abs_score >= effective_weak_signal_threshold:
+            quality_tier = "normal"
+            self._stats.normal_tier_signals += 1
+        else:
+            quality_tier = "weak"
+            self._stats.weak_tier_signals += 1
+
+        # Phase C: 构建质量标签
+        quality_flags = []
+        if abs(score) < effective_weak_signal_threshold:
+            quality_flags.append("weak_signal")
+        if consistency < effective_consistency_min:
+            quality_flags.append("low_consistency")
+
+        # confirm_v1: 现有逻辑（向后兼容）
         confirm = candidate_direction != 0 and not gating_reasons
-        
+
+        # confirm_v2: Phase C - 三档质量分层逻辑
+        confirm_v2 = False
+        soft_guard_reasons = []
+
+        if candidate_direction != 0:
+            # 硬护栏：永远阻塞
+            hard_gating_reasons = [
+                reason for reason in gating_reasons
+                if reason == "warmup"  # 完全匹配
+                or reason.startswith("cooldown_after_exit")  # 前缀匹配，处理 "cooldown_after_exit(3.5s<10s)" 格式
+                or reason.startswith(("spread_bps>", "lag_sec>", "reason:"))
+            ]
+
+            # Phase C: 三档策略判断
+            if not hard_gating_reasons:
+                if quality_tier == "strong":
+                    # strong 档：只要 not hard_block ⇒ 可以 confirm=True（即使有 soft guard）
+                    confirm_v2 = True
+                    soft_guard_reasons = quality_flags  # 记录软护栏用于诊断，但不阻塞
+                elif quality_tier == "normal":
+                    # normal 档：需要 not hard_block AND not weak_signal AND consistency >= consistency_min
+                    if not any(flag in ("weak_signal", "low_consistency") for flag in quality_flags):
+                        confirm_v2 = True
+                    else:
+                        # 有软护栏时记录原因
+                        soft_guard_reasons = quality_flags
+                # weak 档：统一 confirm=False，不记录soft_guard_reasons（因为已经是weak档）
+            else:
+                # 有硬护栏时，记录所有原因到soft_guard_reasons用于诊断
+                soft_guard_reasons = gating_reasons
+
+        # TASK_CONFIRM_PIPELINE_TUNING: Phase B - 根据模式选择confirm逻辑
+        if confirm_mode == "v2":
+            # confirm_v2: 三档质量分层逻辑，硬护栏仍需检查
+            confirm = confirm_v2
+            # 在v2模式下，区分硬护栏和软护栏：
+            # - gating字段只反映硬护栏状态（confirm=True ⇒ gating=1）
+            # - 软护栏信息保留在soft_guard_reasons中用于诊断
+        # confirm_v1: 保持现有逻辑不变（gating反映所有护栏）
+
+        # Phase C: 记录各档位确认统计
+        if confirm:
+            if quality_tier == "strong":
+                self._stats.strong_tier_confirm += 1
+            elif quality_tier == "normal":
+                self._stats.normal_tier_confirm += 1
+            else:  # weak
+                self._stats.weak_tier_confirm += 1
+
         # P0修复: B组连击确认（避免一跳即确认）
         # F4修复: 使用场景化覆写后的min_consecutive
         if confirm and effective_min_consecutive > 1:
@@ -1043,6 +1320,37 @@ class CoreAlgorithm:
                 confirm = False
                 gating_reasons.append(f"reverse_cooldown_insufficient_ticks({streak}<{effective_min_consecutive})")
                 self._stats.suppressed += 1
+                # TASK_CONFIRM_PIPELINE_TUNING: Phase A - 反向防抖拦截统计
+                if enable_funnel_diagnostics:
+                    self._stats.reverse_prevention_blocked += 1
+
+        # TASK-CORE-CONFIRM: debug/QA 输出 - 记录详细决策过程
+        if core_confirm_trace:
+            confirm_reason = "ok" if confirm else ",".join(gating_reasons) if gating_reasons else "no_direction"
+            if confirm and effective_min_consecutive > 1:
+                confirm_reason = f"streak_ok({streak}>={effective_min_consecutive})"
+
+            debug_record = {
+                "ts_ms": ts_ms,
+                "symbol": symbol,
+                "score": score,
+                "direction": candidate_direction,
+                "regime": regime,
+                "activity_tps": row.get("activity_tps", 0),
+                "consistency_score": consistency,
+                "consistency_min": effective_consistency_min,
+                "consistency_min_per_regime": consistency_min_per_regime.get(regime),
+                "gating_reasons": gating_reasons,
+                "is_weak_signal": abs(score) < effective_weak_signal_threshold,
+                "is_low_consistency": consistency < effective_consistency_min,
+                "confirm": confirm,
+                "confirm_reason": confirm_reason,
+                "min_consecutive": effective_min_consecutive,
+                "streak": streak if effective_min_consecutive > 1 else None
+            }
+
+            # 输出到logger（结构化格式）
+            logger.info(f"[CORE_CONFIRM_TRACE] {json.dumps(debug_record, default=str)}")
         
         signal_type = "neutral"
         if confirm:
@@ -1062,6 +1370,16 @@ class CoreAlgorithm:
         # P1 修复3: 契约字段统一 - v1 路径统一使用 decision_reason（与 v2 一致）
         # 保留 gate_reason/guard_reason 作为向后兼容字段，但主要使用 decision_reason
         decision_reason = ",".join(gating_reasons) if gating_reasons else None
+        # TASK_CONFIRM_PIPELINE_TUNING: Phase B - 添加confirm_v2和软护栏诊断字段
+        # 在v2模式下，gating字段只反映硬护栏状态，确保confirm=True ⇒ gating=1
+        if confirm_mode == "v2":
+            gating_value = 1 if not hard_gating_reasons else 0
+            gating_blocked_value = bool(hard_gating_reasons)
+        else:
+            # v1模式：保持现有逻辑，所有护栏都影响gating
+            gating_value = 1 if not gating_reasons else 0
+            gating_blocked_value = bool(gating_reasons)
+
         decision = {
             "ts_ms": ts_ms,
             "symbol": symbol,
@@ -1070,9 +1388,15 @@ class CoreAlgorithm:
             "z_cvd": row.get("z_cvd"),
             "regime": regime,
             "div_type": row.get("div_type"),
+            "consistency_raw": consistency_raw,  # 原始consistency（Fusion输出）
+            "consistency": consistency,  # 应用floor后的consistency（用于gating）
             "confirm": confirm,
-            "gating": 1 if not gating_reasons else 0,  # TASK-A4 修复3: 统一语义，gating=1 表示通过门控（与 v2 一致）
-            "gating_blocked": bool(gating_reasons),  # 修复C: 明确语义 - gating_blocked=True表示"被门控阻止"
+            "confirm_v2": confirm_v2,  # Phase B: confirm_v2 并行输出
+            "soft_guard_reasons": soft_guard_reasons,  # Phase B: 软护栏诊断信息
+            "quality_tier": quality_tier,  # Phase C: 质量档位 (strong/normal/weak)
+            "quality_flags": quality_flags,  # Phase C: 质量标签 (weak_signal/low_consistency)
+            "gating": gating_value,  # TASK-A4 修复3: v2模式下只考虑硬护栏，确保语义一致性
+            "gating_blocked": gating_blocked_value,  # v2模式下只反映硬护栏阻塞状态
             "signal_type": signal_type,
             "decision_reason": decision_reason,  # 统一字段名（与 v2 一致）
             "gate_reason": decision_reason,  # 兼容旧字段
@@ -1080,6 +1404,10 @@ class CoreAlgorithm:
             "run_id": run_id,
             "created_at": created_at,  # P1: 与SQLite的created_at对齐
         }
+
+        # TASK_CONFIRM_PIPELINE_TUNING: Phase A - 最终确认统计
+        if enable_funnel_diagnostics and confirm:
+            self._stats.confirm_true += 1
 
         if confirm:
             self._stats.emitted += 1
@@ -1095,6 +1423,36 @@ class CoreAlgorithm:
     
     def _process_feature_row_v2(self, row: Dict[str, Any], ts_ms: int, symbol: str) -> Optional[Dict[str, Any]]:
         """TASK-A4: 使用 signal/v2 路径处理特征行（单点判定）"""
+        # TASK_P3: 为v2路径添加漏斗诊断统计
+        enable_funnel_diagnostics = (
+            self.config.get("enable_confirm_funnel_diagnostics") or
+            self.config.get("signal", {}).get("enable_confirm_funnel_diagnostics", False)
+        )
+        if enable_funnel_diagnostics:
+            self._stats.total_signals += 1
+
+        # Phase C: v2路径质量分档逻辑
+        strong_threshold = self.config.get("strong_threshold", 0.8)
+        effective_strong_threshold = strong_threshold
+        weak_signal_threshold = self.config.get("weak_signal_threshold", 0.2)
+
+        abs_score = abs(score)
+        if abs_score >= effective_strong_threshold:
+            quality_tier = "strong"
+            self._stats.strong_tier_signals += 1
+        elif abs_score >= weak_signal_threshold:
+            quality_tier = "normal"
+            self._stats.normal_tier_signals += 1
+        else:
+            quality_tier = "weak"
+            self._stats.weak_tier_signals += 1
+
+        # Phase C: 构建质量标签
+        quality_flags = []
+        if abs_score < weak_signal_threshold:
+            quality_flags.append("weak_signal")
+        # 注意：v2路径中consistency相关信息需要在decision_result中获取
+
         score = self._resolve_score(row)
         z_ofi = row.get("z_ofi")
         z_cvd = row.get("z_cvd")
@@ -1170,6 +1528,8 @@ class CoreAlgorithm:
                 "window_ms": self.config.get("window_ms"),
                 "features_ver": os.getenv("CORE_FEATURES_VER", self.config.get("features_ver", "ofi/cvd v3")),
                 "rules_ver": os.getenv("CORE_RULES_VER", self.config.get("rules_ver", "core v1")),
+                "quality_tier": quality_tier,  # Phase C: 质量档位
+                "quality_flags": quality_flags,  # Phase C: 质量标签
             },
         )
         
@@ -1179,6 +1539,23 @@ class CoreAlgorithm:
         except Exception as e:
             logger.error(f"[CoreAlgorithm] Failed to write signal v2: {e}")
         
+        # TASK_P3: 更新v2路径漏斗统计
+        if enable_funnel_diagnostics:
+            if decision_result["confirm"]:
+                self._stats.confirm_true += 1
+                # 在v2路径中，confirm=True意味着通过了所有检查
+                self._stats.pass_weak_signal_filter += 1
+                self._stats.pass_consistency_filter += 1
+                self._stats.candidate_confirm_true += 1
+
+                # Phase C: 记录各档位确认统计
+                if quality_tier == "strong":
+                    self._stats.strong_tier_confirm += 1
+                elif quality_tier == "normal":
+                    self._stats.normal_tier_confirm += 1
+                else:  # weak
+                    self._stats.weak_tier_confirm += 1
+
         # 更新统计
         if decision_result["confirm"]:
             self._stats.emitted += 1
@@ -1290,6 +1667,67 @@ class CoreAlgorithm:
         # 对最终分数也进行 tanh 截断（双重保护）
         import math
         return math.tanh(score / 3.0) * 5.0
+
+    def _calculate_consistency_with_fusion(self, row: Dict[str, Any]) -> float:
+        """TASK-CORE-CONFIRM: 使用Fusion引擎计算consistency
+
+        优先使用Fusion引擎，如果不可用则使用简化的计算作为fallback
+        """
+        # 获取z_ofi和z_cvd值
+        z_ofi_val = row.get("z_ofi") or row.get("ofi_z")
+        z_cvd_val = row.get("z_cvd") or row.get("cvd_z")
+
+        if z_ofi_val is None or z_cvd_val is None:
+            logger.debug("[CoreAlgorithm] Missing z_ofi or z_cvd for consistency calculation, using 0.0")
+            return 0.0
+
+        # 转换为float
+        import math
+        z_ofi = float(z_ofi_val)
+        z_cvd = float(z_cvd_val)
+
+        # 使用Fusion引擎计算consistency（如果可用）
+        if self._fusion_engine is not None:
+            try:
+                # 计算时间戳（用于Fusion引擎）
+                ts_sec = row.get("ts_ms", 0) / 1000.0
+                price = float(row.get("mid", row.get("price", 0)) or 0)
+                lag_sec = float(row.get("lag_sec", 0) or 0)
+
+                # 调用Fusion引擎的update方法
+                fusion_result = self._fusion_engine.update(
+                    z_ofi=z_ofi,
+                    z_cvd=z_cvd,
+                    ts=ts_sec,
+                    lag_sec=lag_sec
+                )
+
+                if fusion_result and 'consistency' in fusion_result:
+                    consistency = fusion_result['consistency']
+                    # clamp到[0,1]范围
+                    consistency = max(0.0, min(1.0, consistency))
+                    return consistency
+                else:
+                    logger.warning("[CoreAlgorithm] Fusion engine returned invalid result, using fallback")
+            except Exception as e:
+                logger.warning(f"[CoreAlgorithm] Fusion engine consistency calculation failed: {e}, using fallback")
+
+        # Fallback: 使用简化的consistency计算
+        eps = 1e-9
+        if abs(z_ofi) < eps or abs(z_cvd) < eps:
+            return 0.0
+
+        # 方向不同 → 直接 0
+        if math.copysign(1, z_ofi) != math.copysign(1, z_cvd):
+            return 0.0
+
+        # 强度一致性：较小 / 较大
+        abs_ofi, abs_cvd = abs(z_ofi), abs(z_cvd)
+        consistency = min(abs_ofi, abs_cvd) / max(abs_ofi, abs_cvd)
+
+        # clamp到[0,1]范围
+        consistency = max(0.0, min(1.0, consistency))
+        return consistency
     
     def _get_dir_streak(self, symbol: str, score: float) -> int:
         """计算方向streak（连续同向tick数）

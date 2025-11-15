@@ -1,0 +1,55 @@
+{
+  "run_id": "test_quality_conservative",
+  "mode": "B",
+  "symbols": [
+    "BTCUSDT"
+  ],
+  "start": "2025-11-15T15:59:00Z",
+  "end": "2025-11-15T15:59:30Z",
+  "seed": 42,
+  "tz": "Asia/Tokyo",
+  "config_path": "runtime/confirm_tuning_experiments/20251116_031908/config_C2_conservative.yaml",
+  "features_dir": null,
+  "signals_src": "jsonl://runtime/confirm_tuning_experiments/20251116_031908/C2_conservative/confirm_tuning_C2_conservative/signals.jsonl",
+  "output_dir": "test_quality_conservative",
+  "gating_mode": "strict",
+  "legacy_backtest_mode": false,
+  "quality_mode": "conservative",
+  "env": {},
+  "effective_config": {
+    "features_price_dir": "deploy\\data\\ofi_cvd",
+    "heartbeat_interval_s": 60,
+    "fee_bps_maker": -25,
+    "fee_bps_taker": 75,
+    "slippage_bps": 0,
+    "latency_ms": 0,
+    "maker_first": true,
+    "min_order_qty": 0.001,
+    "emit_sqlite": false
+  },
+  "git": {
+    "commit": "1d57c12ec84ca388a034fe15bd08625ed1691ee7",
+    "dirty": true
+  },
+  "created_at": "2025-11-15T19:24:59.432821+00:00",
+  "version": "1.0.0",
+  "perf": {
+    "signals_processed": 0,
+    "trades_generated": 0,
+    "duration_s": 0.0,
+    "avg_rps": 0.0,
+    "memory_gib": 0.35,
+    "price_source": {
+      "price_cache_loaded": 0,
+      "price_cache_failure": false,
+      "price_cache_error": null,
+      "price_points_total": 0,
+      "symbols_loaded": []
+    },
+    "data_quality": {
+      "total_signals": 0,
+      "timestamp_monotonic": true,
+      "violations": []
+    }
+  }
+}

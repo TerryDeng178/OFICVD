@@ -1397,17 +1397,21 @@ class SuccessOFICVDHarvester:
                     lag_sec=lag_sec
                 )
                 if result:
+                    fusion_score = result['fusion_score']
+                    k = result.get('calibration_k', self.fusion_cal_k)
+                    proba = 1 / (1 + math.exp(-k * fusion_score))
+
                     return {
-                        'score': result['fusion_score'],
-                        'score_raw': result['fusion_score'],
-                        'proba': result.get('proba', 0.5),
+                        'score': fusion_score,
+                        'score_raw': fusion_score,
+                        'proba': proba,  # 用fusion_score重新计算proba，不再用0.5默认
                         'consistency': result.get('consistency', 0.0),
                         'dispersion': abs(ofi_z - cvd_z),  # 计算离散度
                         'sign_agree': int((ofi_z >= 0) == (cvd_z >= 0)),  # 符号一致性
                         'signal': result.get('signal', 'neutral'),
                         'components': result.get('components', {'ofi': 0.0, 'cvd': 0.0}),
                         'regime': 'normal',
-                        'calibration_k': result.get('calibration_k', 1.0)
+                        'calibration_k': k
                     }
             
             # 备用简化计算（保持原有逻辑）

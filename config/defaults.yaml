@@ -101,6 +101,27 @@ broker:
   # mock_enabled: false
   # 实盘密钥通过环境变量设置：.\scripts\setup_binance_live_env.ps1
 
+execution:
+  enabled: true
+  mode: "dry_run"        # dry_run | live
+  rate_limit:
+    max_qps: 10
+    max_concurrency: 2
+  retry:
+    max_attempts: 3
+    backoff_ms: 500
+  sink:
+    # 默认复用 V13_OUTPUT_DIR
+    base_dir: "./runtime"
+  business:
+    # 交易决策阈值配置
+    long_score_threshold: 0.5    # score > threshold 时做多
+    short_score_threshold: -0.5  # score < threshold 时做空
+    base_order_qty: 100.0        # 基础订单数量（USD）
+  debug:
+    # 调试配置
+    log_skipped_signals: false   # 是否记录被跳过的信号到轻量JSONL
+
 components:
   ofi:
     # TODO: 添加 OFI 配置参数

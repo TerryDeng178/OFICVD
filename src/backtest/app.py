@@ -43,27 +43,48 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def is_tradeable(signal: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+# 软/硬护栏分类常量
+SOFT_GATING = {"weak_signal", "low_consistency"}
+HARD_ALWAYS_BLOCK = {"fallback", "price_cache_failed", "no_price", "spread_bps_exceeded", "lag_sec_exceeded", "kill_switch", "guarded"}
+
+
+def is_tradeable(signal: Dict[str, Any], gating_mode: str = "strict") -> tuple[bool, Optional[str]]:
     """判断信号是否可以交易
 
     Args:
         signal: 信号字典
+        gating_mode: gating策略模式
+            - strict: 生产严格模式，任何gating都阻塞
+            - ignore_soft: 忽略软护栏（weak_signal/low_consistency等）
+            - ignore_all: 完全忽略gating，只看confirm
 
     Returns:
         (can_trade, reason): can_trade为True表示可以交易，reason为不可交易的原因
     """
-    gating = signal.get("gating", [])
-    confirm = signal.get("confirm", False)
+    gating = list(signal.get("gating") or [])
+    confirm = bool(signal.get("confirm", False))
 
-    # 规则1: gating非空，一律不可交易
+    # 1) 硬护栏永远阻塞（即使在ignore模式下）
+    original_gating = list(gating or [])
+    hard_blocks = [g for g in original_gating if g in HARD_ALWAYS_BLOCK]
+    if hard_blocks:
+        return False, f"gating_hard_{','.join(hard_blocks)}"
+
+    # 2) 根据模式调整gating视图
+    if gating_mode == "ignore_soft":
+        gating = [g for g in gating if g not in SOFT_GATING]
+    elif gating_mode == "ignore_all":
+        gating = []
+
+    # 3) 剩余gating一律视为阻塞
     if gating:
-        return False, f"gating: {gating}"
+        return False, f"gating_{','.join(gating)}"
 
-    # 规则2: confirm为False，不可交易
+    # 4) confirm检查照旧
     if not confirm:
         return False, "confirm_false"
 
-    # 规则3: gating为空且confirm=True，可以交易
+    # 5) 通过所有检查，可以交易
     return True, None
 
 
@@ -116,13 +137,20 @@ class StrategyEmulator:
     这个类确保回测和实盘使用相同的决策逻辑，避免drift。
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, gating_mode: str = "strict",
+                 legacy_backtest_mode: bool = False, quality_mode: str = "all"):
         """初始化策略仿真器
 
         Args:
             config: 配置字典，包含min_abs_score_for_side等参数
+            gating_mode: gating策略模式，strict/ignore_soft/ignore_all
+            legacy_backtest_mode: 遗留回测模式，完全忽略confirm和gating
+            quality_mode: 质量档位模式，conservative/balanced/aggressive/all
         """
         self.config = config or {}
+        self.gating_mode = gating_mode
+        self.legacy_backtest_mode = legacy_backtest_mode
+        self.quality_mode = quality_mode
 
     def decide_side(self, signal: Dict[str, Any]) -> Optional[str]:
         """根据信号决定交易方向
@@ -166,15 +194,51 @@ class StrategyEmulator:
     def should_trade(self, signal: Dict[str, Any]) -> tuple[bool, Optional[str]]:
         """判断信号是否应该交易
 
-        使用统一的is_tradeable函数进行判断。
-
         Args:
             signal: 信号字典
 
         Returns:
             (should_trade, reason): should_trade为True表示应该交易，reason为不交易的原因
         """
-        return is_tradeable(signal)
+        # TASK-CORE-CONFIRM: Legacy backtest mode - 完全忽略confirm和gating，只基于direction/score
+        if self.legacy_backtest_mode:
+            # 在legacy模式下，只要有方向信号就交易，完全忽略confirm和gating
+            score = signal.get("score", 0.0)
+            if abs(score) >= self.config.get("min_abs_score_for_side", 0.1):
+                return True, None
+            else:
+                return False, "score_too_low_for_legacy_mode"
+
+        # 正常模式：使用统一的is_tradeable函数
+        can_trade, reason = is_tradeable(signal, gating_mode=self.gating_mode)
+        if not can_trade:
+            return False, reason
+
+        # Phase C: 质量档位过滤
+        if self.quality_mode != "all":
+            quality_tier = signal.get("quality_tier")
+            quality_flags = signal.get("quality_flags", [])
+
+            if self.quality_mode == "conservative":
+                # 只允许 strong 档位
+                if quality_tier != "strong":
+                    return False, f"quality_tier_{quality_tier}_not_allowed_in_conservative_mode"
+            elif self.quality_mode == "balanced":
+                # 允许 strong + normal（但normal不能有low_consistency）
+                if quality_tier == "strong":
+                    pass  # 允许
+                elif quality_tier == "normal":
+                    if "low_consistency" in quality_flags:
+                        return False, "low_consistency_not_allowed_in_balanced_mode"
+                else:  # weak
+                    return False, f"quality_tier_{quality_tier}_not_allowed_in_balanced_mode"
+            elif self.quality_mode == "aggressive":
+                # 所有confirm=True的信号都允许（已在is_tradeable中检查过confirm）
+                pass  # 允许所有已通过confirm检查的信号
+            else:
+                return False, f"unknown_quality_mode_{self.quality_mode}"
+
+        return True, None
 
 
 class PriceCache:
@@ -463,6 +527,20 @@ class BacktestAdapter:
         self.config = config or {}
         self.consistency_qa_mode = consistency_qa_mode
 
+        # CoreAlgorithm实例缓存（按symbol）
+        self._algos = {}
+
+    def close(self):
+        """关闭所有CoreAlgorithm实例"""
+        for symbol, algo in self._algos.items():
+            if algo is not None:
+                try:
+                    algo.close()
+                    logger.debug(f"Closed CoreAlgorithm for {symbol}")
+                except Exception as e:
+                    logger.warning(f"Error closing CoreAlgorithm for {symbol}: {e}")
+        self._algos.clear()
+
     def _load_price_cache(self):
         """加载价格缓存：使用PriceCache类"""
         if self._price_cache_loaded or self.mode != 'B':
@@ -590,7 +668,6 @@ class BacktestAdapter:
     def _compute_signals_from_features(self, config: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
         """从features实时计算signals - 接入真实CoreAlgorithm"""
         # 为每个symbol创建独立的CoreAlgorithm实例
-        algos = {}
         temp_dirs = {}
 
         try:
@@ -614,6 +691,9 @@ class BacktestAdapter:
 
             # QA模式：收集真实信号用于一致性分布分析
             qa_signals = []
+            gating_counts = {}  # gating原因计数
+            confirm_true_count = 0  # confirm=True的信号数量
+            passed_signals = 0  # 通过所有护栏的信号数量
 
             logger.info(f"[DEBUG] Starting to process features, core_import_success={core_import_success}")
             features_iter = self.iter_features()
@@ -631,10 +711,10 @@ class BacktestAdapter:
                     logger.info(f"[DEBUG] First feature_row fusion_score: {feature_row.get('fusion_score')}")
 
                 # 为每个symbol初始化CoreAlgorithm（如果还没有）
-                if symbol not in algos:
+                if symbol not in self._algos:
                     if not core_import_success:
                         # 导入失败，直接设置None，走fallback逻辑
-                        algos[symbol] = None
+                        self._algos[symbol] = None
                     else:
                         temp_dir = Path(tempfile.mkdtemp())
                         temp_dirs[symbol] = temp_dir
@@ -643,13 +723,13 @@ class BacktestAdapter:
                         algo_config = config.copy()
                         algo_config.setdefault("sink", {})["kind"] = "null"
 
-                        algos[symbol] = CoreAlgorithm(
+                        self._algos[symbol] = CoreAlgorithm(
                             config=algo_config,
                             sink_kind="null",
                             output_dir=temp_dir
                         )
 
-                algo = algos[symbol]
+                algo = self._algos[symbol]
 
                 # 调用真实CoreAlgorithm进行信号计算
 
@@ -709,12 +789,24 @@ class BacktestAdapter:
                         # QA模式：收集信号用于一致性分布分析
                         qa_signals.append({
                             'score': signal.get('score'),
-                            'consistency': feature_row.get('consistency'),
+                            'consistency': signal.get('consistency', 0.0),  # TASK-CORE-CONFIRM: 从信号获取实际用于gating的consistency
                             'z_ofi': feature_row.get('z_ofi') or feature_row.get('ofi_z'),
                             'z_cvd': feature_row.get('z_cvd') or feature_row.get('cvd_z'),
                             'gating': signal.get('gating', []),
                             'confirm': signal.get('confirm', False)
                         })
+
+                        # 收集gating统计
+                        gating_list = signal.get('gating', [])
+                        if gating_list:
+                            for reason in gating_list:
+                                gating_counts[reason] = gating_counts.get(reason, 0) + 1
+                        else:
+                            gating_counts['none'] = gating_counts.get('none', 0) + 1
+
+                        # 统计confirm=True的信号
+                        if signal.get('confirm', False):
+                            confirm_true_count += 1
 
                         logger.debug(f"[DEBUG] Signal score: {signal.get('score')}, confirm: {signal.get('confirm')}, gating: {signal.get('gating')}")
                         logger.debug(f"[DEBUG] Yielding real signal for {symbol}: confirm={signal.get('confirm')}, gating={signal.get('gating')}")
@@ -806,12 +898,91 @@ class BacktestAdapter:
 
                 logger.info("[CONSISTENCY_QA] Real signals distribution:")
                 logger.info(f"  Total real signals: {len(qa_signals)}")
-                for bucket, count in consistency_buckets.items():
-                    if count > 0:
-                        logger.info(f"  Consistency {bucket}: {count} ({count/len(qa_signals)*100:.1f}%)")
-                logger.info(f"  Weak signal gated: {weak_signal_count} ({weak_signal_count/len(qa_signals)*100:.1f}%)")
-                logger.info(f"  Low consistency gated: {low_consistency_count} ({low_consistency_count/len(qa_signals)*100:.1f}%)")
-                logger.info(f"  Passed all gates: {passed_signals} ({passed_signals/len(qa_signals)*100:.1f}%)")
+                if qa_signals:
+                    for bucket, count in consistency_buckets.items():
+                        if count > 0:
+                            logger.info(f"  Consistency {bucket}: {count} ({count/len(qa_signals)*100:.1f}%)")
+                    logger.info(f"  Weak signal gated: {weak_signal_count} ({weak_signal_count/len(qa_signals)*100:.1f}%)")
+                    logger.info(f"  Low consistency gated: {low_consistency_count} ({low_consistency_count/len(qa_signals)*100:.1f}%)")
+                    logger.info(f"  Passed all gates: {passed_signals} ({passed_signals/len(qa_signals)*100:.1f}%)")
+                else:
+                    logger.info("  No signals to analyze")
+
+            # consistency分布QA检查
+            consistency_buckets = {
+                '< 0.00': 0,
+                '[0.00, 0.05)': 0,
+                '[0.05, 0.15)': 0,
+                '[0.15, 0.30)': 0,
+                '[0.30, 0.50)': 0,
+                '[0.50, 0.70)': 0,
+                '[0.70, 1.00]': 0,
+                '> 1.00': 0
+            }
+
+            for signal in qa_signals:
+                consistency = signal.get('consistency', 0.0)
+                if consistency < 0.0:
+                    consistency_buckets['< 0.00'] += 1
+                elif consistency < 0.05:
+                    consistency_buckets['[0.00, 0.05)'] += 1
+                elif consistency < 0.15:
+                    consistency_buckets['[0.05, 0.15)'] += 1
+                elif consistency < 0.30:
+                    consistency_buckets['[0.15, 0.30)'] += 1
+                elif consistency < 0.50:
+                    consistency_buckets['[0.30, 0.50)'] += 1
+                elif consistency < 0.70:
+                    consistency_buckets['[0.50, 0.70)'] += 1
+                elif consistency <= 1.0:
+                    consistency_buckets['[0.70, 1.00]'] += 1
+                else:
+                    consistency_buckets['> 1.00'] += 1
+
+            # 断言：consistency不能为负数
+            if consistency_buckets['< 0.00'] > 0:
+                logger.error(f"[CONSISTENCY_QA] ERROR: Found {consistency_buckets['< 0.00']} signals with negative consistency!")
+                raise ValueError(f"Negative consistency detected: {consistency_buckets['< 0.00']} signals")
+
+            logger.info("[CONSISTENCY_QA] Consistency distribution:")
+            for bucket, count in consistency_buckets.items():
+                if count > 0:
+                    logger.info(f"  {bucket}: {count} ({count/len(qa_signals)*100:.1f}%)")
+
+            # 输出gating QA快照
+            if qa_signals:
+                gating_qa_summary = {
+                    "total_signals": len(qa_signals),
+                    "confirm_true_ratio": confirm_true_count / len(qa_signals) if qa_signals else 0.0,
+                    "gating_counts": gating_counts,
+                    "gating_distribution": {
+                        reason: count / len(qa_signals) * 100
+                        for reason, count in gating_counts.items()
+                    },
+                    "passed_signals": passed_signals,
+                    "passed_ratio": passed_signals / len(qa_signals) * 100 if qa_signals else 0.0,
+                    "consistency_buckets": consistency_buckets,
+                    "consistency_distribution": {
+                        bucket: count / len(qa_signals) * 100
+                        for bucket, count in consistency_buckets.items()
+                    }
+                }
+
+                # 写入gating_qa_summary.json（如果有output_dir的话）
+                # 注意：BacktestAdapter可能没有output_dir，这里只是为了兼容性
+                if hasattr(self, 'output_dir'):
+                    gating_qa_path = self.output_dir / "gating_qa_summary.json"
+                    with gating_qa_path.open("w", encoding="utf-8") as f:
+                        json.dump(gating_qa_summary, f, ensure_ascii=False, indent=2)
+                    logger.info(f"[GATING_QA] Saved gating QA summary to {gating_qa_path}")
+
+                    # 写入详细的gating_qa.jsonl（可选，用于更详细分析）
+                    if getattr(self, 'consistency_qa_mode', False):
+                        gating_qa_detail_path = self.output_dir / "gating_qa_detail.jsonl"
+                        with gating_qa_detail_path.open("w", encoding="utf-8") as f:
+                            for signal in qa_signals:
+                                f.write(json.dumps(signal, ensure_ascii=False) + "\n")
+                        logger.info(f"[GATING_QA] Saved detailed gating QA to {gating_qa_detail_path}")
 
         finally:
             # 清理临时目录
@@ -1087,7 +1258,8 @@ class BacktestWriter:
         self.allowed_extensions = {'.jsonl', '.json', '.sqlite', '.log'}
         self.allowed_filenames = {
             'signals.jsonl', 'signals.sqlite', 'trades.jsonl',
-            'pnl_daily.jsonl', 'run_manifest.json'
+            'pnl_daily.jsonl', 'run_manifest.json',
+            'gating_qa_summary.json', 'gating_qa_detail.jsonl'
         }
 
         # 初始化文件句柄
@@ -1332,6 +1504,9 @@ def build_run_manifest(args, config: Dict[str, Any], symbols, features_price_dir
         "features_dir": getattr(args, 'features_dir', None),
         "signals_src": getattr(args, 'signals_src', None),
         "output_dir": str(args.out_dir),
+        "gating_mode": getattr(args, 'gating_mode', 'strict'),
+        "legacy_backtest_mode": bool(getattr(args, 'legacy_backtest_mode', False)),
+        "quality_mode": getattr(args, 'quality_mode', 'all'),
         "env": env_whitelist,
         "effective_config": {
             "features_price_dir": str(features_price_dir) if features_price_dir else None,
@@ -1391,6 +1566,22 @@ def main():
                        help="一致性QA模式：输出真实信号的一致性分布统计")
     parser.add_argument("--reemit-signals", action="store_true",
                        help="模式B下按需重发signals（默认不写，便于对账）")
+    parser.add_argument("--gating-mode", choices=["strict", "ignore_soft", "ignore_all"],
+                       default="strict",
+                       help="Backtest gating mode: "
+                            "strict=production style; "
+                            "ignore_soft=忽略 weak_signal/low_consistency 等软护栏; "
+                            "ignore_all=完全忽略 gating（只看 confirm）")
+    parser.add_argument("--legacy-backtest-mode", action="store_true",
+                       help="Legacy backtest mode: 完全忽略confirm和gating，只基于direction/score交易 "
+                            "(仅用于诊断对比，不进入正式评估/CI)")
+    parser.add_argument("--quality-mode", choices=["conservative", "balanced", "aggressive", "all"],
+                       default="all",
+                       help="Quality tier filtering mode: "
+                            "conservative=only strong tier; "
+                            "balanced=strong + normal (no low_consistency); "
+                            "aggressive=all confirmed signals; "
+                            "all=no quality filtering")
 
     args = parser.parse_args()
 
@@ -1466,7 +1657,9 @@ def main():
     )
 
     broker = BrokerSimulator(config.get("broker", {}))
-    strategy_emulator = StrategyEmulator(config)
+    strategy_emulator = StrategyEmulator(config, gating_mode=args.gating_mode,
+                                        legacy_backtest_mode=getattr(args, 'legacy_backtest_mode', False),
+                                        quality_mode=getattr(args, 'quality_mode', 'all'))
     writer = BacktestWriter(
         Path(args.out_dir),
         manifest["run_id"],
@@ -1843,6 +2036,7 @@ def main():
 
     finally:
         writer.close()
+        adapter.close()
 
 
 if __name__ == "__main__":

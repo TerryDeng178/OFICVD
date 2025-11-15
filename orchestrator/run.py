@@ -164,8 +164,8 @@ class Supervisor:
         """启动所有启用的模块"""
         logger.info(f"开始启动模块: {enabled_modules}")
         
-        # 启动顺序：harvest -> signal -> strategy -> broker -> report
-        order = ["harvest", "signal", "strategy", "broker", "report"]
+        # 启动顺序：harvest -> signal -> strategy -> broker -> execution -> report
+        order = ["harvest", "signal", "strategy", "broker", "execution", "report"]
         
         for name in order:
             if name in enabled_modules and name in self.processes:
@@ -588,8 +588,8 @@ class Supervisor:
         self.running = False
         self.shutdown_event.set()
         
-        # TASK-07A: 记录关闭顺序：report -> broker -> strategy -> signal -> harvest
-        order = ["report", "broker", "strategy", "signal", "harvest"]
+        # TASK-07A: 记录关闭顺序：report -> execution -> broker -> strategy -> signal -> harvest
+        order = ["report", "execution", "broker", "strategy", "signal", "harvest"]
         
         for name in order:
             if name in self.processes:
@@ -2404,7 +2404,34 @@ def build_process_specs(
         max_restarts=2
     )
     specs.append(broker_spec)
-    
+
+    # Execution Worker (新增：实时执行 Worker，消费信号并执行订单)
+    execution_output_dir = output_dir_rel / "executions"
+    execution_spec = ProcessSpec(
+        name="execution",
+        cmd=[
+            "python", "-m", "alpha_core.executors.execution_worker",
+            "--config", str(config_path),
+            "--symbols", ",".join(symbols)
+        ],
+        env={
+            "RUN_ID": run_id,
+            "PYTHONPATH": str(Path.cwd() / "src"),
+            "V13_SINK": sink_kind,  # 传递 sink 类型给 execution worker
+            "V13_OUTPUT_DIR": str(output_dir_rel),  # 传递输出目录
+        },
+        ready_probe="log_keyword",
+        ready_probe_args={"keyword": "启动执行 Worker"},
+        health_probe="file_count",
+        health_probe_args={
+            "pattern": str(execution_output_dir / "executions.db"),
+            "min_count": 1
+        },
+        restart_policy="on_failure",
+        max_restarts=2
+    )
+    specs.append(execution_spec)
+
     # Strategy Server (新增：策略执行服务，包含风控模块)
     strategy_env = {
         "RUN_ID": run_id,
@@ -2935,7 +2962,7 @@ def parse_args():
         "--enable",
         type=str,
         default="",
-        help="启用的模块（逗号分隔，可选: harvest,signal,broker,report）"
+        help="启用的模块（逗号分隔，可选: harvest,signal,broker,execution,report）"
     )
     
     parser.add_argument(

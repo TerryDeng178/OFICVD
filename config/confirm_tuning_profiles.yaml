@@ -1,0 +1,40 @@
+# TASK_CONFIRM_PIPELINE_TUNING: Phase C - 参数搜索配置
+# confirm_tuning_profiles: 在 v1/v2 边界之间收敛目标区间
+
+# 基础配置（所有profile共享）
+confirm_mode: "v2"  # 使用新的三档质量分层逻辑
+enable_confirm_funnel_diagnostics: true
+funnel_output_mode: "both"  # 输出到日志和JSON文件
+
+# 信号配置
+signal:
+  # 固定参数
+  weak_signal_threshold: 0.2  # 基础值，会被profile覆盖
+  strong_threshold: 0.8  # 基础值，会被profile覆盖
+  consistency_min: 0.15  # 基础值，会被profile覆盖
+  consistency_min_per_regime:
+    active: 0.10
+    quiet: 0.15
+  min_consecutive_same_dir: 1
+
+# 参数调优 profiles
+# 目标：在 v1极严（confirm_true_rate≈1-2%）和 v2偏松（confirm_true_rate≈24%）之间找到合理区间
+# 预期结果：conservative≈5%, balanced≈8-12%, aggressive≈12-15%
+confirm_tuning_profiles:
+  - name: "C2_conservative"
+    description: "保守策略：接近v1极严，强调质量控制"
+    weak_signal_threshold: 0.15  # 略低于基础0.2，提高对弱信号的容忍
+    consistency_min: 0.10  # 略低于基础0.15，但仍要求一定一致性
+    strong_threshold: 1.0  # 较高的strong阈值，减少strong信号数量
+
+  - name: "C2_balanced"
+    description: "平衡策略：折中方案，在质量和数量间平衡"
+    weak_signal_threshold: 0.12  # 适度放宽弱信号阈值
+    consistency_min: 0.08  # 适度降低一致性要求
+    strong_threshold: 0.9  # 适中的strong阈值
+
+  - name: "C2_aggressive"
+    description: "激进策略：接近v2偏松，优先保证信号数量"
+    weak_signal_threshold: 0.10  # 明显放宽弱信号阈值
+    consistency_min: 0.05  # 大幅降低一致性要求
+    strong_threshold: 0.8  # 较低的strong阈值，增加strong信号数量

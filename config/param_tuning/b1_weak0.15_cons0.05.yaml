@@ -1,0 +1,88 @@
+signal:
+  sink: jsonl
+  output_dir: ./runtime
+  replay_mode: 1
+  weak_signal_threshold: 0.15
+  consistency_min: 0.05
+  consistency_min_per_regime:
+    active: 0.05
+    quiet: 0.08
+  min_consecutive_same_dir: 1
+  min_abs_score_for_side: 0.0
+  thresholds:
+    active:
+      buy: 0.4
+      sell: -0.4
+components:
+  fusion:
+    w_ofi: 0.6
+    w_cvd: 0.4
+    adaptive_cooldown_k: 0.6
+    flip_rearm_margin: 0.05
+    min_consecutive: 3
+  cvd:
+    winsor_limit: 2.0
+strategy:
+  mode: active
+  direction: both
+  entry_threshold: 0.0
+  exit_threshold: 0.0
+execution:
+  cooldown_ms: 500
+risk:
+  max_position_notional: 10000
+  max_drawdown_bps: 2000
+  gates:
+    max_spread_bps: 2.5
+    max_lag_sec: 0.5
+    require_activity: true
+aligner:
+  lag_threshold_ms: 5000
+  spread_threshold: 2.0
+  volatility_threshold: 5.0
+reader:
+  dedup_keep_hours: 2
+backtest:
+  taker_fee_bps: 2.0
+  slippage_bps: 1.0
+  notional_per_trade: 1000
+  reverse_on_signal: false
+  take_profit_bps: null
+  stop_loss_bps: null
+  min_hold_time_sec: null
+  ignore_gating_in_backtest: true
+  rollover_timezone: UTC
+  rollover_hour: 0
+  slippage_model: static
+  fee_model: taker_static
+  slippage_piecewise:
+    scenario_multipliers:
+      A_H: 1.5
+      A_L: 1.0
+      Q_H: 1.5
+      Q_L: 0.8
+    spread_base_multiplier: 1.0
+  fee_tiered:
+    tier_mapping:
+      TM: 2.0
+      TK: 2.0
+      MM: 1.0
+      MK: 1.0
+  fee_maker_taker:
+    scenario_probs:
+      Q_H: 0.2
+      A_L: 0.8
+      A_H: 0.4
+      Q_L: 0.6
+    spread_slope: 0.7
+    spread_threshold_wide: 5.0
+    spread_threshold_narrow: 1.0
+    side_bias:
+      buy: 1.2
+      sell: 0.8
+    maker_fee_ratio: 0.5
+data:
+  features_price_dir: deploy/data/ofi_cvd
+paths:
+  input_dir: ./deploy/data/ofi_cvd
+  output_dir: ./runtime/backtest
